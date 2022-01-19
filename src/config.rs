@@ -18,9 +18,13 @@ pub const AUDIO_DATA_SOCKET_ADDRESS: &str = "0.0.0.0:8082";
 /// Socket address UI connection.
 pub const UI_SOCKET_ADDRESS: &str = "127.0.0.1:8081";
 
+pub const DATA_PORT: u16 = 8082;
 
 #[derive(Debug, Clone)]
-pub struct ServerConfig {
+pub struct LogicConfig {
     pub pa_source_name: Option<String>,
     pub encode_opus: bool,
+    pub enable_connection_listening: bool,
+    pub enable_ping: bool,
+    pub connect_address: Option<SocketAddr>,
 }

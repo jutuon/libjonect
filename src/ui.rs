@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::{
-    device::TcpSupportError,
+    connection::tcp::ListenerError,
     message_router::{MessageReceiver, RouterSender},
 };
 
@@ -38,7 +38,7 @@ pub enum UiProtocolFromUiToServer {
 /// Event to `UiConnectionManager`.
 #[derive(Debug)]
 pub enum UiEvent {
-    TcpSupportDisabledBecauseOfError(TcpSupportError),
+    TcpSupportDisabledBecauseOfError(ListenerError),
 }
 
 /// Quit reason for `UiConnectionManager::handle_connection`.
@@ -121,13 +121,11 @@ impl UiConnectionManager {
         mut quit_receiver: &mut QuitReceiver,
         connection: TcpStream,
     ) -> QuitReason {
-        let (read_half, write_half) = connection.into_split();
-
         let (sender, mut connections_receiver) =
             mpsc::channel::<ConnectionEvent<UiProtocolFromUiToServer>>(EVENT_CHANNEL_SIZE);
 
         let connection_handle: ConnectionHandle<UiProtocolFromUiToServer> =
-            Connection::spawn_connection_task(0, read_half, write_half, sender.into());
+            Connection::spawn_connection_task(connection, sender.into());
 
         tokio::pin!(ui_receiver);
 
@@ -147,15 +145,15 @@ impl UiConnectionManager {
                 }
                 event = connections_receiver.recv() => {
                     match event.unwrap() {
-                        ConnectionEvent::ReadError(id, error) => {
-                            eprintln!("Connection id {} read error {:?}", id, error);
+                        ConnectionEvent::ReadError(error) => {
+                            eprintln!("UI connection read error {:?}", error);
                             break QuitReason::ConnectionError;
                         }
-                        ConnectionEvent::WriteError(id, error) => {
-                            eprintln!("Connection id {} write error {:?}", id, error);
+                        ConnectionEvent::WriteError(error) => {
+                            eprintln!("UI connection write error {:?}", error);
                             break QuitReason::ConnectionError;
                         }
-                        ConnectionEvent::Message(_, message) => {
+                        ConnectionEvent::Message(message) => {
                             let sender = &mut server_sender;
                             let handle_message = async move {
                                 match message {

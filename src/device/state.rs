@@ -4,28 +4,26 @@
 
 //! Connected device's state.
 
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use tokio::{
-    net::TcpStream,
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 
 use crate::{
-    config::{ServerConfig, EVENT_CHANNEL_SIZE},
+    config::{LogicConfig, EVENT_CHANNEL_SIZE},
     audio::AudioEvent,
     message_router::RouterSender,
     utils::{
         Connection, ConnectionEvent, ConnectionHandle, ConnectionId, QuitReceiver, QuitSender,
         SendDownward,
-    },
+    }, connection::{JsonConnection, tcp::TcpSendHandle, ConnectionManagerEvent},
 };
 
 use super::{
-    data::{DataConnection, DataConnectionEvent, DataConnectionHandle},
     protocol::{
-        AudioFormat, AudioStreamInfo, ClientInfo, ClientMessage, ServerInfo, ServerMessage,
+        AudioFormat, AudioStreamInfo, DeviceMessage, NativeSampleRate,
     },
     DeviceManagerInternalEvent,
 };
@@ -33,7 +31,7 @@ use super::{
 /// Event to `DeviceStateTask`.
 #[derive(Debug)]
 pub enum DeviceEvent {
-    DataConnection(DataConnectionEvent),
+    NewDataConnection(TcpSendHandle),
     SendPing,
 }
 
@@ -60,36 +58,36 @@ impl DeviceStateTaskHandle {
 /// Logic for handling one connected device.
 pub struct DeviceStateTask {
     id: ConnectionId,
-    address: SocketAddr,
-    connection_handle: ConnectionHandle<ServerMessage>,
+    connection_handle: ConnectionHandle<DeviceMessage>,
     ping_state: Option<Instant>,
-    audio_out: Option<DataConnectionHandle>,
+    audio_out: Option<()>,
     r_sender: RouterSender,
     event_sender: mpsc::Sender<DeviceEvent>,
     event_receiver: mpsc::Receiver<DeviceEvent>,
-    connection_receiver: mpsc::Receiver<ConnectionEvent<ClientMessage>>,
-    config: Arc<ServerConfig>,
-    client_info: Option<ClientInfo>,
+    connection_receiver: mpsc::Receiver<ConnectionEvent<DeviceMessage>>,
+    config: Arc<LogicConfig>,
+    native_sample_rate: Option<i32>,
 }
 
 impl DeviceStateTask {
     /// Start new `DeviceStateTask`.
     pub async fn task(
-        id: ConnectionId,
-        stream: TcpStream,
-        address: SocketAddr,
+        connection: JsonConnection,
         r_sender: RouterSender,
-        config: Arc<ServerConfig>,
+        config: Arc<LogicConfig>,
     ) -> DeviceStateTaskHandle {
+
         let (connection_sender, connection_receiver) =
-            mpsc::channel::<ConnectionEvent<ClientMessage>>(EVENT_CHANNEL_SIZE);
+            mpsc::channel::<ConnectionEvent<DeviceMessage>>(EVENT_CHANNEL_SIZE);
 
-        let (read_half, write_half) = stream.into_split();
-        let connection_handle: ConnectionHandle<ServerMessage> =
-            Connection::spawn_connection_task(id, read_half, write_half, connection_sender.into());
+        let id = connection.id();
+        let connection_handle: ConnectionHandle<DeviceMessage> =
+            Connection::spawn_connection_task(connection, connection_sender.into());
 
-        let message = ServerMessage::ServerInfo(ServerInfo::new("Test server"));
-        connection_handle.send_down(message).await;
+        // TODO: This should be removed in the future?
+        if config.enable_connection_listening {
+            connection_handle.send_down(DeviceMessage::GetNativeSampleRate).await;
+        }
 
         let (event_sender, event_receiver) = mpsc::channel::<DeviceEvent>(EVENT_CHANNEL_SIZE);
 
@@ -100,13 +98,12 @@ impl DeviceStateTask {
             connection_handle,
             r_sender,
             ping_state: None,
-            address,
             audio_out: None,
             event_receiver,
             event_sender: event_sender.clone(),
             connection_receiver,
             config,
-            client_info: None,
+            native_sample_rate: None,
         };
 
         let task_handle = tokio::spawn(device_task.run(quit_receiver));
@@ -130,15 +127,15 @@ impl DeviceStateTask {
                 }
                 event = self.connection_receiver.recv() => {
                     match event.unwrap() {
-                        ConnectionEvent::ReadError(id, error) => {
-                            eprintln!("Connection id {} read error {:?}", id, error);
+                        ConnectionEvent::ReadError(error) => {
+                            eprintln!("Connection id {} read error {:?}", self.id, error);
                             break Some(WaitQuit);
                         }
-                        ConnectionEvent::WriteError(id, error) => {
-                            eprintln!("Connection id {} write error {:?}", id, error);
+                        ConnectionEvent::WriteError(error) => {
+                            eprintln!("Connection id {} write error {:?}", self.id, error);
                             break Some(WaitQuit);
                         }
-                        ConnectionEvent::Message(_, message) => {
+                        ConnectionEvent::Message(message) => {
                             tokio::select! {
                                 result = &mut quit_receiver => {
                                     result.unwrap();
@@ -162,7 +159,8 @@ impl DeviceStateTask {
         };
 
         if let Some(audio) = self.audio_out.take() {
-            audio.quit().await;
+            // TODO: remove this?,
+            //audio.quit().await;
         }
         self.connection_handle.quit().await;
 
@@ -180,72 +178,49 @@ impl DeviceStateTask {
     /// Handle `DeviceEvent`.
     async fn handle_device_event(&mut self, event: DeviceEvent) {
         match event {
-            DeviceEvent::DataConnection(event) => {
-                self.handle_data_connection_message(event).await;
+            DeviceEvent::NewDataConnection(send_handle) => {
+                if self.audio_out.is_some() {
+                    self.r_sender
+                        .send_audio_server_event(AudioEvent::StartRecording {
+                            send_handle,
+                            sample_rate: self.native_sample_rate.unwrap() as u32,
+                        })
+                        .await;
+                } else {
+                    self.r_sender
+                        .send_audio_server_event(AudioEvent::PlayAudio {
+                            send_handle,
+                        })
+                        .await;
+                }
             }
             DeviceEvent::SendPing => {
                 if self.ping_state.is_none() {
-                    self.connection_handle.send_down(ServerMessage::Ping).await;
+                    self.connection_handle.send_down(DeviceMessage::Ping).await;
                     self.ping_state = Some(Instant::now());
                 }
             }
         }
     }
 
-    /// Handle `ClientMessage`.
-    async fn handle_client_message(&mut self, message: ClientMessage) {
+    /// Handle received `DeviceMessage`.
+    async fn handle_client_message(&mut self, message: DeviceMessage) {
+        println!("Message: {:?}\n", message);
         match message {
-            ClientMessage::ClientInfo(info) => {
-                println!("ClientInfo {:?}", info);
+            DeviceMessage::NativeSampleRate(NativeSampleRate { native_sample_rate }) => {
+                if native_sample_rate == 0 {
+                    // Audio playing is not supported.
+                    return;
+                }
 
-                self.client_info = Some(info);
-
-                let handle = DataConnection::task(
-                    self.connection_handle.id(),
-                    self.event_sender.clone().into(),
-                    self.address,
+                assert!(
+                    native_sample_rate == 44100
+                        || native_sample_rate == 48000
                 );
 
-                self.audio_out = Some(handle);
-            }
-            ClientMessage::Ping => {
-                self.connection_handle
-                    .send_down(ServerMessage::PingResponse)
-                    .await;
-            }
-            ClientMessage::PingResponse => {
-                if let Some(time) = self.ping_state.take() {
-                    let time = Instant::now().duration_since(time).as_millis();
-                    println!("Ping time {} ms", time);
-                }
-            }
-            ClientMessage::AudioStreamPlayError(error) => {
-                eprintln!("AudioStreamPlayError {:?}", error);
-            }
-        }
-    }
+                self.native_sample_rate = Some(native_sample_rate);
 
-    /// Handle `DataConnectionEvent`.
-    pub async fn handle_data_connection_message(&mut self, message: DataConnectionEvent) {
-        match message {
-            DataConnectionEvent::NewConnection(handle) => {
-                self.r_sender
-                    .send_audio_server_event(AudioEvent::StartRecording {
-                        send_handle: handle,
-                        sample_rate: self.client_info.as_ref().unwrap().native_sample_rate as u32,
-                    })
-                    .await;
-            }
-            DataConnectionEvent::PortNumber(tcp_port) => {
-                let mut sample_rate = if let Some(client_info) = &self.client_info {
-                    assert!(
-                        client_info.native_sample_rate == 44100
-                            || client_info.native_sample_rate == 48000
-                    );
-                    client_info.native_sample_rate as u32
-                } else {
-                    return;
-                };
+                let mut sample_rate = native_sample_rate as u32;
 
                 let format = if self.config.encode_opus {
                     sample_rate = 48000;
@@ -254,17 +229,39 @@ impl DeviceStateTask {
                     AudioFormat::Pcm
                 };
 
-                let info = AudioStreamInfo::new(format, 2u8, sample_rate, tcp_port);
+                let info = AudioStreamInfo::new(format, 2u8, sample_rate, 8082);
 
                 self.connection_handle
-                    .send_down(ServerMessage::PlayAudioStream(info))
+                    .send_down(DeviceMessage::PlayAudioStream(info))
+                    .await;
+
+                self.audio_out = Some(());
+            }
+            DeviceMessage::GetNativeSampleRate => {
+                self.connection_handle
+                    .send_down(DeviceMessage::NativeSampleRate(NativeSampleRate::new(44100)))
                     .await;
             }
-            e @ DataConnectionEvent::TcpListenerBindError(_)
-            | e @ DataConnectionEvent::GetPortNumberError(_)
-            | e @ DataConnectionEvent::AcceptError(_)
-            | e @ DataConnectionEvent::SendConnectionError(_) => {
-                eprintln!("Error: {:?}", e);
+            DeviceMessage::Ping => {
+                self.connection_handle
+                    .send_down(DeviceMessage::PingResponse)
+                    .await;
+            }
+            DeviceMessage::PingResponse => {
+                if let Some(time) = self.ping_state.take() {
+                    let time = Instant::now().duration_since(time).as_millis();
+                    println!("Ping time {} ms", time);
+                }
+            }
+            DeviceMessage::AudioStreamPlayError(error) => {
+                eprintln!("AudioStreamPlayError {:?}", error);
+            }
+            DeviceMessage::PlayAudioStream(info) => {
+                self.r_sender
+                    .send_connection_manager_event(ConnectionManagerEvent::ConnectToData {
+                        id: self.id
+                    })
+                    .await;
             }
         }
     }

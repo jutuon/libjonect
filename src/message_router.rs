@@ -6,7 +6,7 @@
 
 use tokio::sync::mpsc;
 
-use crate::{config, utils};
+use crate::{config, utils, connection::{ConnectionManagerEvent}};
 
 use super::{
     audio::AudioEvent,
@@ -25,6 +25,7 @@ pub enum RouterEvent {
 pub enum RouterMessage {
     AudioServer(AudioEvent),
     DeviceManager(DmEvent),
+    ConnectionManager(ConnectionManagerEvent),
     Ui(UiEvent),
     Router(RouterEvent),
 }
@@ -36,6 +37,7 @@ pub struct Router {
     audio_sender: mpsc::Sender<AudioEvent>,
     device_manager_sender: mpsc::Sender<DmEvent>,
     ui_sender: mpsc::Sender<UiEvent>,
+    cm_sender: mpsc::Sender<ConnectionManagerEvent>,
 }
 
 impl Router {
@@ -46,6 +48,7 @@ impl Router {
         MessageReceiver<DmEvent>,
         MessageReceiver<UiEvent>,
         MessageReceiver<AudioEvent>,
+        MessageReceiver<ConnectionManagerEvent>,
     ) {
         let (r_sender, r_receiver) = mpsc::channel(config::EVENT_CHANNEL_SIZE);
 
@@ -55,12 +58,14 @@ impl Router {
             mpsc::channel(config::EVENT_CHANNEL_SIZE);
         let (ui_sender, ui_receiver) = mpsc::channel(config::EVENT_CHANNEL_SIZE);
         let (audio_sender, audio_receiver) = mpsc::channel(config::EVENT_CHANNEL_SIZE);
+        let (cm_sender, cm_receiver) = mpsc::channel(config::EVENT_CHANNEL_SIZE);
 
         let router = Self {
             r_receiver,
             audio_sender,
             device_manager_sender,
             ui_sender,
+            cm_sender,
         };
 
         (
@@ -69,6 +74,7 @@ impl Router {
             MessageReceiver::new(device_manager_receiver),
             MessageReceiver::new(ui_receiver),
             MessageReceiver::new(audio_receiver),
+            MessageReceiver::new(cm_receiver),
         )
     }
 
@@ -81,6 +87,7 @@ impl Router {
             tokio::select! {
                 result = &mut quit_receiver => break result.unwrap(),
                 Some(event) = self.r_receiver.recv() => {
+                    println!("Event: {:?}\n", event);
                     match event {
                         RouterMessage::AudioServer(event) => {
                             tokio::select! {
@@ -92,6 +99,12 @@ impl Router {
                             tokio::select! {
                                 result = &mut quit_receiver => break result.unwrap(),
                                 result = self.device_manager_sender.send(event) => result.unwrap(),
+                            }
+                        }
+                        RouterMessage::ConnectionManager(event) => {
+                            tokio::select! {
+                                result = &mut quit_receiver => break result.unwrap(),
+                                result = self.cm_sender.send(event) => result.unwrap(),
                             }
                         }
                         RouterMessage::Ui(event) => {
@@ -142,6 +155,13 @@ impl RouterSender {
     pub async fn send_dm_internal_event(&mut self, event: DmEvent) {
         self.sender
             .send(RouterMessage::DeviceManager(event))
+            .await
+            .unwrap()
+    }
+
+    pub async fn send_connection_manager_event(&mut self, event: ConnectionManagerEvent) {
+        self.sender
+            .send(RouterMessage::ConnectionManager(event))
             .await
             .unwrap()
     }

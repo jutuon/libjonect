@@ -9,6 +9,7 @@
 //! 2. Send JSON message (UTF-8).
 //!
 //! # Protocol messages
+//! TODO: update
 //! 1. Server sends ServerMessage::ServerInfo message to the client.
 //! 2. Client sends ClientMessage::ClientInfo message to the server.
 //! 3. Client and server communicate with different protocol messages.
@@ -17,22 +18,6 @@
 //!    are received.
 
 use serde::{Deserialize, Serialize};
-
-/// First message from server to the client.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ServerInfo {
-    pub version: String,
-    pub id: String,
-}
-
-impl ServerInfo {
-    pub fn new<T: Into<String>>(id: T) -> Self {
-        Self {
-            version: "0.1".to_string(),
-            id: id.into(),
-        }
-    }
-}
 
 /// Available audio stream formats.
 pub enum AudioFormat {
@@ -82,48 +67,29 @@ impl AudioStreamInfo {
     }
 }
 
-/// Message from server to client.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ServerMessage {
-    ServerInfo(ServerInfo),
-    /// Client should respond with ClientMessage::PingResponse
-    /// when it receives this message.
-    Ping,
-    /// Server should send this when client sends ClientMessage::Ping.
-    PingResponse,
-    PlayAudioStream(AudioStreamInfo),
+pub struct NativeSampleRate {
+    pub native_sample_rate: i32,
+}
+
+impl NativeSampleRate {
+    pub fn new(native_sample_rate: i32) -> Self {
+        Self {
+            native_sample_rate
+        }
+    }
 }
 
 /// Message from client to server.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-pub enum ClientMessage {
-    ClientInfo(ClientInfo),
-    // Send ping request to server. Server should respond with
-    // ServerMessage::PingResponse.
+pub enum DeviceMessage {
     Ping,
-    // Client sends this message to server when it receives ServerMessage::Ping.
     PingResponse,
     AudioStreamPlayError(String),
-}
-
-/// First message from the client to the server.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ClientInfo {
-    pub version: String,
-    pub id: String,
-    /// Client's native sample rate. Server should send audio data with same
-    /// sample rate to reduce audio latency.
-    pub native_sample_rate: i32,
-}
-
-impl ClientInfo {
-    pub fn new<T: Into<String>>(id: T) -> Self {
-        Self {
-            version: "0.1".to_string(),
-            id: id.into(),
-            native_sample_rate: 44100,
-        }
-    }
+    PlayAudioStream(AudioStreamInfo),
+    /// Request native sample rate of device which will receive this message.
+    GetNativeSampleRate,
+    /// Native sample rate of device which send this message.
+    NativeSampleRate(NativeSampleRate),
 }

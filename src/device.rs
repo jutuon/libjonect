@@ -4,12 +4,11 @@
 
 //! Connect devices (clients) to the server.
 
-pub mod data;
+//pub mod data;
 pub mod protocol;
 pub mod state;
 
 use tokio::{
-    net::TcpListener,
     sync::{oneshot},
     task::JoinHandle,
 };
@@ -17,14 +16,13 @@ use tokio::{
 use std::{
     collections::HashMap,
     fmt::Debug,
-    io::{self},
     sync::Arc,
     time::Duration,
 };
 
 use crate::{
-    config::{self, ServerConfig},
-    utils::{ConnectionId, QuitReceiver, QuitSender},
+    config::{LogicConfig},
+    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent, tcp::TcpSendHandle},
 };
 
 use self::{
@@ -33,15 +31,7 @@ use self::{
 
 use super::{
     message_router::{MessageReceiver, RouterSender},
-    ui::UiEvent,
 };
-
-/// TCP socket errors which disables TCP support.
-#[derive(Debug)]
-pub enum TcpSupportError {
-    ListenerCreationError(io::Error),
-    AcceptError(io::Error),
-}
 
 /// `DeviceManager`'s internal event type.
 #[derive(Debug)]
@@ -77,16 +67,16 @@ impl From<DeviceManagerInternalEvent> for DmEvent {
 #[derive(Debug)]
 pub enum DeviceManagerEvent {
     RunDeviceConnectionPing,
+    NewDeviceConnection(JsonConnection),
+    NewDataConnection(ConnectionId, TcpSendHandle),
 }
 
 /// Logic for connecting devices (clients) to the server.
 pub struct DeviceManager {
     r_sender: RouterSender,
     receiver: MessageReceiver<DmEvent>,
-    next_connection_id: u64,
     connections: HashMap<ConnectionId, DeviceStateTaskHandle>,
-    tcp_listener_enabled: bool,
-    config: Arc<ServerConfig>,
+    config: Arc<LogicConfig>,
 }
 
 impl DeviceManager {
@@ -94,16 +84,14 @@ impl DeviceManager {
     pub fn task(
         r_sender: RouterSender,
         receiver: MessageReceiver<DmEvent>,
-        config: Arc<ServerConfig>,
+        config: Arc<LogicConfig>,
     ) -> (JoinHandle<()>, QuitSender) {
         let (quit_sender, quit_receiver) = oneshot::channel();
 
         let dm = Self {
             r_sender,
             receiver,
-            next_connection_id: 0,
             connections: HashMap::new(),
-            tcp_listener_enabled: true,
             config,
         };
 
@@ -116,43 +104,20 @@ impl DeviceManager {
 
     /// Run device manager logic.
     pub async fn run(mut self, mut quit_receiver: QuitReceiver) {
-        let listener = match TcpListener::bind(config::DEVICE_SOCKET_ADDRESS).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                let e = TcpSupportError::ListenerCreationError(e);
-                let e = UiEvent::TcpSupportDisabledBecauseOfError(e);
-
-                tokio::select! {
-                    result = &mut quit_receiver => return result.unwrap(),
-                    _ = self.r_sender.send_ui_event(e) => (),
-                };
-
-                // Wait quit message.
-                quit_receiver.await.unwrap();
-                return;
-            }
-        };
-
-        let mut ping_timer = tokio::time::interval(Duration::from_secs(1));
+        let mut ping_timer = tokio::time::interval(Duration::from_secs(10));
 
         // TODO: Use single quit select and move other logic to async block.
 
         loop {
             tokio::select! {
                 result = &mut quit_receiver => break result.unwrap(),
-                result = listener.accept(), if self.tcp_listener_enabled => {
-                    tokio::select! {
-                        result = &mut quit_receiver => break result.unwrap(),
-                        _ = self.handle_tcp_listener_accept(result) => (),
-                    };
-                }
                 event = self.receiver.recv() => {
                     tokio::select! {
                         result = &mut quit_receiver => break result.unwrap(),
                         _ = self.handle_dm_event(event) => (),
                     };
                 }
-                _ = ping_timer.tick() => {
+                _ = ping_timer.tick(), if self.config.enable_ping => {
                     tokio::select! {
                         result = &mut quit_receiver => break result.unwrap(),
                         _ = self.handle_ping_timer_tick() => (),
@@ -168,43 +133,6 @@ impl DeviceManager {
         }
     }
 
-    /// Handle TCP listener accept.
-    pub async fn handle_tcp_listener_accept(
-        &mut self,
-        result: std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>,
-    ) {
-        match result {
-            Ok((stream, address)) => {
-                let id = self.next_connection_id;
-                self.next_connection_id = match id.checked_add(1) {
-                    Some(new_next_id) => new_next_id,
-                    None => {
-                        eprintln!("Warning: Couldn't handle a new connection because there is no new connection ID numbers.");
-                        return;
-                    }
-                };
-
-                let device_state = DeviceStateTask::task(
-                    id,
-                    stream,
-                    address,
-                    self.r_sender.clone(),
-                    self.config.clone(),
-                )
-                .await;
-
-                self.connections.insert(id, device_state);
-            }
-            Err(e) => {
-                let e = TcpSupportError::AcceptError(e);
-                let e = UiEvent::TcpSupportDisabledBecauseOfError(e);
-                self.r_sender.send_ui_event(e).await;
-
-                self.tcp_listener_enabled = false;
-            }
-        }
-    }
-
     /// Handle `DmEvent`.
     pub async fn handle_dm_event(&mut self, event: DmEvent) {
         match event.value {
@@ -214,9 +142,29 @@ impl DeviceManager {
                         connection.send(DeviceEvent::SendPing).await;
                     }
                 }
+                DeviceManagerEvent::NewDeviceConnection(connection) => {
+                    let id = connection.id();
+
+                    let device_state = DeviceStateTask::task(
+                        connection,
+                        self.r_sender.clone(),
+                        self.config.clone(),
+                    )
+                    .await;
+
+                    self.connections.insert(id, device_state);
+                }
+                DeviceManagerEvent::NewDataConnection(id, handle) => {
+                    if let Some(device) = self.connections.get_mut(&id) {
+                        device.send(DeviceEvent::NewDataConnection(handle)).await;
+                    }
+                }
             },
             DeviceManagerInternalEvent::RemoveConnection(id) => {
-                self.connections.remove(&id).unwrap().quit().await
+                self.connections.remove(&id).unwrap().quit().await;
+                self.r_sender.send_connection_manager_event(
+                    ConnectionManagerEvent::RemoveDataConnections{id}
+                ).await;
             }
         }
     }

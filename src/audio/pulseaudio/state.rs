@@ -20,7 +20,7 @@ use super::{
     AudioEvent, EventToAudioServerSender,
 };
 
-use crate::{audio::pulseaudio::AudioServerEvent, device::data::TcpSendHandle};
+use crate::{audio::pulseaudio::AudioServerEvent, connection::tcp::TcpSendHandle};
 
 /// PulseAudio code events.
 #[derive(Debug)]

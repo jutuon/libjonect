@@ -14,7 +14,7 @@ use bytes::{Buf, BytesMut};
 
 use pulse::{context::Context, def::BufferAttr, sample::Spec, stream::Stream};
 
-use crate::{audio::pulseaudio::state::PAEvent, device::data::TcpSendHandle};
+use crate::{audio::pulseaudio::state::PAEvent, connection::tcp::TcpSendHandle};
 
 use super::EventToAudioServerSender;
 

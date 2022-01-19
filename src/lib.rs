@@ -6,24 +6,26 @@ pub mod audio;
 pub mod device;
 pub mod message_router;
 pub mod ui;
+pub mod connection;
 
 use crate::{
-    config::ServerConfig,
+    config::LogicConfig,
         audio::AudioManager, device::DeviceManager, message_router::Router, ui::UiConnectionManager,
 
 };
 
+use connection::ConnectionManager;
 use tokio::signal;
 
 use tokio::runtime::Runtime;
 
-/// Async server code.
-pub struct AsyncServer {
-    config: std::sync::Arc<ServerConfig>,
+
+pub struct AsyncLogic {
+    config: std::sync::Arc<LogicConfig>,
 }
 
-impl AsyncServer {
-    pub fn new(config: ServerConfig) -> Self {
+impl AsyncLogic {
+    pub fn new(config: LogicConfig) -> Self {
         Self {
             config: config.into(),
         }
@@ -33,7 +35,7 @@ impl AsyncServer {
     pub async fn run(&mut self) {
         // Init message routing.
 
-        let (router, r_sender, device_manager_receiver, ui_receiver, audio_receiver) =
+        let (router, mut r_sender, device_manager_receiver, ui_receiver, audio_receiver, cm_receiver) =
             Router::new();
         let (r_quit_sender, r_quit_receiver) = tokio::sync::oneshot::channel();
 
@@ -51,7 +53,23 @@ impl AsyncServer {
         let (ui_task_handle, ui_quit_sender) =
             UiConnectionManager::task(r_sender.clone(), ui_receiver);
 
+        let (cm_task_handle, cm_quit_sender) = ConnectionManager::start_task(
+            r_sender.clone(),
+            cm_receiver,
+            self.config.clone(),
+        );
+
         let mut ctrl_c_listener_enabled = true;
+
+        // TODO: remove this?
+        if self.config.enable_connection_listening {
+            r_sender.send_connection_manager_event(connection::ConnectionManagerEvent::StartTcpListener).await;
+        }
+
+        if let Some(address) = self.config.connect_address {
+            r_sender.send_connection_manager_event(connection::ConnectionManagerEvent::ConnectTo { address }).await;
+        }
+
 
         loop {
             tokio::select! {
@@ -61,6 +79,7 @@ impl AsyncServer {
                             dm_quit_sender.send(()).unwrap();
                             ui_quit_sender.send(()).unwrap();
                             audio_quit_sender.send(()).unwrap();
+                            cm_quit_sender.send(()).unwrap();
                             break;
                         }
                         Err(e) => {
@@ -77,6 +96,7 @@ impl AsyncServer {
         audio_task_handle.await.unwrap();
         dm_task_handle.await.unwrap();
         ui_task_handle.await.unwrap();
+        cm_task_handle.await.unwrap();
 
         // And finally close router.
 
@@ -85,12 +105,12 @@ impl AsyncServer {
     }
 }
 
-/// Start server.
-pub struct Server;
 
-impl Server {
-    /// Starts server. Blocks until server is closed.
-    pub fn run(config: ServerConfig) {
+pub struct Logic;
+
+impl Logic {
+    /// Starts main logic. Blocks until main logic is closed.
+    pub fn run(config: LogicConfig) {
         let rt = match Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
@@ -99,7 +119,7 @@ impl Server {
             }
         };
 
-        let mut server = AsyncServer::new(config);
+        let mut server = AsyncLogic::new(config);
 
         rt.block_on(server.run());
     }

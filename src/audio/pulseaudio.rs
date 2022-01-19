@@ -20,7 +20,7 @@ use self::{
 
 use super::AudioEvent;
 
-use crate::{config::ServerConfig, message_router::RouterSender};
+use crate::{config::LogicConfig, message_router::RouterSender};
 
 /// PulseAudio code events.
 #[derive(Debug)]
@@ -37,11 +37,11 @@ pub enum AudioServerEvent {
 /// AudioServer will modify glib thread default MainContext.
 pub struct AudioServer {
     server_event_sender: RouterSender,
-    config: std::sync::Arc<ServerConfig>,
+    config: std::sync::Arc<LogicConfig>,
 }
 
 impl AudioServer {
-    pub fn new(server_event_sender: RouterSender, config: std::sync::Arc<ServerConfig>) -> Self {
+    pub fn new(server_event_sender: RouterSender, config: std::sync::Arc<LogicConfig>) -> Self {
         Self {
             server_event_sender,
             config,
@@ -93,7 +93,7 @@ impl AudioServer {
                     AudioEvent::StopRecording => {
                         pa_state.stop_recording();
                     }
-                    AudioEvent::Message(_) => (),
+                    AudioEvent::Message(_) | AudioEvent::PlayAudio {..} => (),
                 },
                 AudioServerEvent::PAEvent(event) => {
                     pa_state.handle_pa_event(event);
@@ -147,7 +147,7 @@ pub struct PulseAudioThread {
 
 impl PulseAudioThread {
     /// Create and start new PulseAudio thread.
-    pub async fn start(r_sender: RouterSender, config: Arc<ServerConfig>) -> Self {
+    pub async fn start(r_sender: RouterSender, config: Arc<LogicConfig>) -> Self {
         let (init_ok_sender, init_ok_receiver) = oneshot::channel();
 
         let audio_thread = Some(std::thread::spawn(move || {

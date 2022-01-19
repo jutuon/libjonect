@@ -19,55 +19,8 @@ use crate::{
 
 use super::state::DeviceEvent;
 
-/// Send data to connected device. Writing will be nonblocking. Drop this to close
-/// `TcpSendConnection`.
-#[derive(Debug)]
-pub struct TcpSendHandle {
-    tcp_stream: std::net::TcpStream,
-    _shutdown_watch: ConnectionShutdownWatch,
-}
 
-impl std::io::Write for TcpSendHandle {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.tcp_stream.write(buf)
-    }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.tcp_stream.flush()
-    }
-}
-
-/// Handle to `TcpSendHandle`.
-#[derive(Debug)]
-pub struct TcpSendConnection {
-    shutdown_watch_receiver: mpsc::Receiver<()>,
-}
-
-impl TcpSendConnection {
-    /// Create `TcpSendConnection` and `TcpSendHandle`.
-    pub fn new(tcp_stream: std::net::TcpStream) -> Result<(Self, TcpSendHandle), std::io::Error> {
-        tcp_stream.set_nonblocking(true)?;
-        let (_shutdown_watch, shutdown_watch_receiver) = mpsc::channel::<()>(1);
-
-        let handle = TcpSendHandle {
-            tcp_stream,
-            _shutdown_watch,
-        };
-
-        let connection = Self {
-            shutdown_watch_receiver,
-        };
-
-        Ok((connection, handle))
-    }
-
-    /// Wait until `TcpSendHandle` is dropped.
-    pub async fn wait_quit(mut self) {
-        // TODO: Shutdown the socket here?
-
-        let _ = self.shutdown_watch_receiver.recv().await;
-    }
-}
 
 /// Events which `DataConnection` can send.
 #[derive(Debug)]
@@ -88,40 +41,11 @@ impl From<DataConnectionEvent> for DeviceEvent {
     }
 }
 
-/// Event from `Device` to `DataConnection`.
-#[derive(Debug)]
-pub enum DataConnectionEventFromDevice {
-    Test,
-}
 
-/// Handle to `DataConnection` task.
-pub struct DataConnectionHandle {
-    command_connection_id: ConnectionId,
-    task_handle: JoinHandle<()>,
-    event_sender: SendDownward<DataConnectionEventFromDevice>,
-    quit_sender: oneshot::Sender<()>,
-}
-
-impl DataConnectionHandle {
-    pub fn id(&self) -> ConnectionId {
-        self.command_connection_id
-    }
-
-    /// Send quit request to `DataConnection` and wait untill it is closed.
-    pub async fn quit(self) {
-        self.quit_sender.send(()).unwrap();
-        self.task_handle.await.unwrap();
-    }
-
-    /// Send `DataConnectionEventFromDevice`.
-    pub async fn send_down(&self, message: DataConnectionEventFromDevice) {
-        self.event_sender.send_down(message).await
-    }
-}
 
 /// Task for waiting data connection from the device.
 pub struct DataConnection {
-    command_connection_id: ConnectionId,
+
     sender: SendUpward<DeviceEvent>,
     receiver: mpsc::Receiver<DataConnectionEventFromDevice>,
     quit_receiver: oneshot::Receiver<()>,
@@ -132,7 +56,6 @@ pub struct DataConnection {
 impl DataConnection {
     /// Start new `DataConnection` task.
     pub fn task(
-        command_connection_id: ConnectionId,
         sender: SendUpward<DeviceEvent>,
         accept_from: SocketAddr,
     ) -> DataConnectionHandle {
@@ -140,7 +63,6 @@ impl DataConnection {
         let (quit_sender, quit_receiver) = oneshot::channel();
 
         let manager = Self {
-            command_connection_id,
             sender,
             receiver,
             quit_receiver,
@@ -151,7 +73,6 @@ impl DataConnection {
         let task_handle = tokio::spawn(manager.run());
 
         DataConnectionHandle {
-            command_connection_id,
             task_handle,
             event_sender: event_sender.into(),
             quit_sender,
