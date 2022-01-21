@@ -123,11 +123,11 @@ impl PAState {
             }
             State::Failed => {
                 self.context_ready = false;
-                eprintln!("PAContext state: Failed");
+                error!("PAContext state: Failed");
                 // TODO: Send error.
             }
             State::Terminated => {
-                eprintln!("PAContext state: Terminated");
+                info!("PAContext state: Terminated");
                 self.sender.send(AudioServerEvent::PAQuitReady);
                 self.context_ready = false;
             }
@@ -147,7 +147,7 @@ impl PAState {
                 description,
                 monitor_source,
             } => {
-                println!(
+                info!(
                     "description: {}, monitor_source: {}",
                     description, monitor_source
                 );

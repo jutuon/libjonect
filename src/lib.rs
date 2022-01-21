@@ -1,4 +1,6 @@
-
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 pub mod utils;
 pub mod config;
@@ -18,6 +20,9 @@ use connection::ConnectionManager;
 use tokio::signal;
 
 use tokio::runtime::Runtime;
+use utils::{QuitReceiver, QuitSender};
+
+use log::{error, info};
 
 
 pub struct AsyncLogic {
@@ -31,8 +36,7 @@ impl AsyncLogic {
         }
     }
 
-    /// Future for main server task.
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, mut logic_quit_receiver: QuitReceiver) {
         // Init message routing.
 
         let (router, mut r_sender, device_manager_receiver, ui_receiver, audio_receiver, cm_receiver) =
@@ -70,26 +74,30 @@ impl AsyncLogic {
             r_sender.send_connection_manager_event(connection::ConnectionManagerEvent::ConnectTo { address }).await;
         }
 
-
         loop {
             tokio::select! {
                 quit_request = signal::ctrl_c(), if ctrl_c_listener_enabled => {
                     match quit_request {
                         Ok(()) => {
-                            dm_quit_sender.send(()).unwrap();
-                            ui_quit_sender.send(()).unwrap();
-                            audio_quit_sender.send(()).unwrap();
-                            cm_quit_sender.send(()).unwrap();
                             break;
                         }
                         Err(e) => {
                             ctrl_c_listener_enabled = false;
-                            eprintln!("Failed to listen CTRL+C. Error: {}", e);
+                            error!("Failed to listen CTRL+C. Error: {}", e);
                         }
                     }
                 }
+                result = &mut logic_quit_receiver => {
+                    result.unwrap();
+                    break;
+                }
             }
         }
+
+        dm_quit_sender.send(()).unwrap();
+        ui_quit_sender.send(()).unwrap();
+        audio_quit_sender.send(()).unwrap();
+        cm_quit_sender.send(()).unwrap();
 
         // Quit started. Wait all components to close.
 
@@ -110,17 +118,33 @@ pub struct Logic;
 
 impl Logic {
     /// Starts main logic. Blocks until main logic is closed.
-    pub fn run(config: LogicConfig) {
+    pub fn run(config: LogicConfig, quit_receiver: Option<QuitReceiver>) {
         let rt = match Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("{}", e);
+                error!("{}", e);
                 return;
             }
         };
 
-        let mut server = AsyncLogic::new(config);
+        let (sender, receiver) = match quit_receiver {
+            Some(receiver) => {
+                (None, receiver)
+            }
+            None => {
+                let (sender, receiver) = Self::create_quit_notification_channel();
+                (Some(sender), receiver)
+            },
+        };
 
-        rt.block_on(server.run());
+        let mut logic = AsyncLogic::new(config);
+
+        rt.block_on(logic.run(receiver));
+
+        drop(sender);
+    }
+
+    pub fn create_quit_notification_channel() -> (QuitSender, QuitReceiver) {
+        tokio::sync::oneshot::channel()
     }
 }

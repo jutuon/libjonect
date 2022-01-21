@@ -22,7 +22,7 @@ use std::{
 
 use crate::{
     config::{LogicConfig},
-    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent, tcp::TcpSendHandle},
+    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent, tcp::TcpSendHandle}, ui::UiEvent,
 };
 
 use self::{
@@ -69,6 +69,8 @@ pub enum DeviceManagerEvent {
     RunDeviceConnectionPing,
     NewDeviceConnection(JsonConnection),
     NewDataConnection(ConnectionId, TcpSendHandle),
+    UiNativeSampleRate(ConnectionId, i32),
+    DisconnectAllDevices,
 }
 
 /// Logic for connecting devices (clients) to the server.
@@ -159,12 +161,28 @@ impl DeviceManager {
                         device.send(DeviceEvent::NewDataConnection(handle)).await;
                     }
                 }
+                DeviceManagerEvent::UiNativeSampleRate(id, native_sample_rate) => {
+                    if let Some(device) = self.connections.get_mut(&id) {
+                        device.send(DeviceEvent::UiNativeSampleRate(native_sample_rate)).await;
+                    }
+                }
+                DeviceManagerEvent::DisconnectAllDevices => {
+                    for (id, connection) in self.connections.iter_mut() {
+                        connection.send(DeviceEvent::Disconnect).await;
+                    }
+                }
             },
             DeviceManagerInternalEvent::RemoveConnection(id) => {
-                self.connections.remove(&id).unwrap().quit().await;
                 self.r_sender.send_connection_manager_event(
                     ConnectionManagerEvent::RemoveDataConnections{id}
                 ).await;
+                self.connections.remove(&id).unwrap().quit().await;
+
+                if self.connections.is_empty() {
+                    // TODO: It is possible that there is some data connections
+                    // running when this event is sent.
+                    self.r_sender.send_ui_event(UiEvent::AllDevicesAreNowDisconnected).await;
+                }
             }
         }
     }

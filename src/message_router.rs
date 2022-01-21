@@ -4,6 +4,8 @@
 
 //! Message router for sending messages between components.
 
+use log::debug;
+
 use tokio::sync::mpsc;
 
 use crate::{config, utils, connection::{ConnectionManagerEvent}};
@@ -87,7 +89,7 @@ impl Router {
             tokio::select! {
                 result = &mut quit_receiver => break result.unwrap(),
                 Some(event) = self.r_receiver.recv() => {
-                    println!("Event: {:?}\n", event);
+                    debug!("Event: {:?}\n", event);
                     match event {
                         RouterMessage::AudioServer(event) => {
                             tokio::select! {

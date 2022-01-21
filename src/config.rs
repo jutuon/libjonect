@@ -19,6 +19,7 @@ pub const AUDIO_DATA_SOCKET_ADDRESS: &str = "0.0.0.0:8082";
 pub const UI_SOCKET_ADDRESS: &str = "127.0.0.1:8081";
 
 pub const DATA_PORT: u16 = 8082;
+pub const JSON_PORT: u16 = 8080;
 
 #[derive(Debug, Clone)]
 pub struct LogicConfig {

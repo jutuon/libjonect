@@ -4,6 +4,8 @@
 
 //! Connected device's state.
 
+use log::{info, error, debug};
+
 use std::{sync::Arc, time::Instant};
 
 use tokio::{
@@ -18,7 +20,7 @@ use crate::{
     utils::{
         Connection, ConnectionEvent, ConnectionHandle, ConnectionId, QuitReceiver, QuitSender,
         SendDownward,
-    }, connection::{JsonConnection, tcp::TcpSendHandle, ConnectionManagerEvent},
+    }, connection::{JsonConnection, tcp::TcpSendHandle, ConnectionManagerEvent}, ui::{ValueRequest, UiEvent},
 };
 
 use super::{
@@ -33,6 +35,8 @@ use super::{
 pub enum DeviceEvent {
     NewDataConnection(TcpSendHandle),
     SendPing,
+    UiNativeSampleRate(i32),
+    Disconnect,
 }
 
 /// Handle to `DeviceStateTask`.
@@ -55,6 +59,12 @@ impl DeviceStateTaskHandle {
     }
 }
 
+enum QuitMode {
+    QuitRequest,
+    Disconnect,
+    ConnectionError,
+}
+
 /// Logic for handling one connected device.
 pub struct DeviceStateTask {
     id: ConnectionId,
@@ -67,6 +77,7 @@ pub struct DeviceStateTask {
     connection_receiver: mpsc::Receiver<ConnectionEvent<DeviceMessage>>,
     config: Arc<LogicConfig>,
     native_sample_rate: Option<i32>,
+    ui_native_sample_rate: ValueRequest<i32, DeviceMessage>,
 }
 
 impl DeviceStateTask {
@@ -104,6 +115,7 @@ impl DeviceStateTask {
             connection_receiver,
             config,
             native_sample_rate: None,
+            ui_native_sample_rate: ValueRequest::new(),
         };
 
         let task_handle = tokio::spawn(device_task.run(quit_receiver));
@@ -117,45 +129,41 @@ impl DeviceStateTask {
 
     /// Run `DeviceStateTask`.
     pub async fn run(mut self, mut quit_receiver: QuitReceiver) {
-        struct WaitQuit;
+        let logic = async {
+            self.r_sender.send_ui_event(UiEvent::ConnectionEstablished { connection_id: self.id }).await;
 
-        let wait_quit: Option<WaitQuit> = loop {
-            tokio::select! {
-                result = &mut quit_receiver => {
-                    result.unwrap();
-                    break None;
-                }
-                event = self.connection_receiver.recv() => {
-                    match event.unwrap() {
-                        ConnectionEvent::ReadError(error) => {
-                            eprintln!("Connection id {} read error {:?}", self.id, error);
-                            break Some(WaitQuit);
-                        }
-                        ConnectionEvent::WriteError(error) => {
-                            eprintln!("Connection id {} write error {:?}", self.id, error);
-                            break Some(WaitQuit);
-                        }
-                        ConnectionEvent::Message(message) => {
-                            tokio::select! {
-                                result = &mut quit_receiver => {
-                                    result.unwrap();
-                                    break None;
-                                }
-                                _ = self.handle_client_message(message) => (),
+            loop {
+                tokio::select! {
+                    event = self.connection_receiver.recv() => {
+                        match event.unwrap() {
+                            ConnectionEvent::ReadError(error) => {
+                                error!("Connection id {} read error {:?}", self.id, error);
+                                break QuitMode::ConnectionError;
+                            }
+                            ConnectionEvent::WriteError(error) => {
+                                error!("Connection id {} write error {:?}", self.id, error);
+                                break QuitMode::ConnectionError;
+                            }
+                            ConnectionEvent::Message(message) => {
+                                self.handle_client_message(message).await;
                             }
                         }
                     }
-                }
-                event = self.event_receiver.recv() => {
-                    tokio::select! {
-                        result = &mut quit_receiver => {
-                            result.unwrap();
-                            break None;
+                    event = self.event_receiver.recv() => {
+                        if let Some(quit_mode) = self.handle_device_event(event.unwrap()).await {
+                            break quit_mode;
                         }
-                        _ = self.handle_device_event(event.unwrap()) => (),
                     }
                 }
             }
+        };
+
+        let quit_mode = tokio::select! {
+            result = &mut quit_receiver => {
+                result.unwrap();
+                QuitMode::QuitRequest
+            }
+            quit_mode = logic => quit_mode,
         };
 
         if let Some(audio) = self.audio_out.take() {
@@ -164,7 +172,11 @@ impl DeviceStateTask {
         }
         self.connection_handle.quit().await;
 
-        if let Some(WaitQuit) = wait_quit {
+        if let QuitMode::ConnectionError = quit_mode {
+            self.r_sender.send_ui_event(UiEvent::ConnectionError { connection_id: self.id }).await;
+        }
+
+        if let QuitMode::ConnectionError | QuitMode::Disconnect = quit_mode {
             self.r_sender
                 .send_dm_internal_event(
                     DeviceManagerInternalEvent::RemoveConnection(self.id).into(),
@@ -176,7 +188,7 @@ impl DeviceStateTask {
     }
 
     /// Handle `DeviceEvent`.
-    async fn handle_device_event(&mut self, event: DeviceEvent) {
+    async fn handle_device_event(&mut self, event: DeviceEvent) -> Option<QuitMode> {
         match event {
             DeviceEvent::NewDataConnection(send_handle) => {
                 if self.audio_out.is_some() {
@@ -200,12 +212,22 @@ impl DeviceStateTask {
                     self.ping_state = Some(Instant::now());
                 }
             }
+            DeviceEvent::UiNativeSampleRate(native_sample_rate) => {
+                for message in self.ui_native_sample_rate.set_value(native_sample_rate) {
+                    self.connection_handle.send_down(message).await;
+                }
+            }
+            DeviceEvent::Disconnect => {
+                return Some(QuitMode::Disconnect);
+            }
         }
+
+        None
     }
 
     /// Handle received `DeviceMessage`.
     async fn handle_client_message(&mut self, message: DeviceMessage) {
-        println!("Message: {:?}\n", message);
+        debug!("Message: {:?}\n", message);
         match message {
             DeviceMessage::NativeSampleRate(NativeSampleRate { native_sample_rate }) => {
                 if native_sample_rate == 0 {
@@ -238,9 +260,16 @@ impl DeviceStateTask {
                 self.audio_out = Some(());
             }
             DeviceMessage::GetNativeSampleRate => {
-                self.connection_handle
-                    .send_down(DeviceMessage::NativeSampleRate(NativeSampleRate::new(44100)))
-                    .await;
+                let message = self.ui_native_sample_rate.request(
+                    |value| DeviceMessage::NativeSampleRate(NativeSampleRate::new(*value))
+                );
+                if let Some(message) = message {
+                    self.connection_handle.send_down(message).await;
+                } else {
+                    self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
+                        who_sent_this: self.id,
+                    }).await;
+                }
             }
             DeviceMessage::Ping => {
                 self.connection_handle
@@ -250,11 +279,11 @@ impl DeviceStateTask {
             DeviceMessage::PingResponse => {
                 if let Some(time) = self.ping_state.take() {
                     let time = Instant::now().duration_since(time).as_millis();
-                    println!("Ping time {} ms", time);
+                    info!("Ping time {} ms", time);
                 }
             }
             DeviceMessage::AudioStreamPlayError(error) => {
-                eprintln!("AudioStreamPlayError {:?}", error);
+                error!("AudioStreamPlayError {:?}", error);
             }
             DeviceMessage::PlayAudioStream(info) => {
                 self.r_sender

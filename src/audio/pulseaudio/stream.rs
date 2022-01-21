@@ -163,17 +163,17 @@ impl PAStreamManager {
 
         match state {
             State::Failed => {
-                eprintln!("Recording stream state: Failed.");
+                error!("Recording stream state: Failed.");
             }
             State::Terminated => {
                 self.record = None;
                 if self.quit_requested {
                     self.sender.send_pa(PAEvent::StreamManagerQuitReady);
                 }
-                eprintln!("Recording stream state: Terminated.");
+                info!("Recording stream state: Terminated.");
             }
             State::Ready => {
-                println!("Recording from {:?}", stream.get_device_name());
+                info!("Recording from {:?}", stream.get_device_name());
             }
             _ => (),
         }
@@ -210,7 +210,7 @@ impl PAStreamManager {
                 if count < data.len() {
                     let remaining_bytes = &data[count..];
                     data_write_buffer.extend_from_slice(remaining_bytes);
-                    println!(
+                    info!(
                         "Recording state: buffering {} bytes.",
                         remaining_bytes.len()
                     );
@@ -304,7 +304,7 @@ impl PAStreamManager {
                     match result {
                         Ok(()) => (),
                         Err(e) => {
-                            eprintln!("Audio streaming error: {:?}", e);
+                            error!("Audio streaming error: {:?}", e);
                             r.discard().unwrap();
                             self.enable_recording = false;
                             self.stop_recording();
@@ -330,7 +330,7 @@ impl PAStreamManager {
             }
             PARecordingStreamEvent::Moved => {
                 if let Some(name) = self.record.as_ref().map(|(s, _)| s.get_device_name()) {
-                    println!("Recording stream moved. Device name: {:?}", name);
+                    info!("Recording stream moved. Device name: {:?}", name);
                 }
             }
         }

@@ -11,15 +11,16 @@ serde = { version = "1.0.126", features = ["derive"] }
 tokio = { version = "1.10.0", features = ["full"] }
 bytes = "1.0.1"
 audiopus = "0.3.0-rc.0"
+log = "0.4.14"
 
-[dependencies.pulse]
+[target.'cfg(target_os = "linux")'.dependencies.pulse]
 version = "2.24"
 package = "libpulse-binding"
 
-[dependencies.pulse_glib]
+[target.'cfg(target_os = "linux")'.dependencies.pulse_glib]
 version = "2.24"
 package = "libpulse-glib-binding"
 
-[dependencies.gtk]
+[target.'cfg(target_os = "linux")'.dependencies.gtk]
 version = "0.14.0"
 features = ["v3_20"]

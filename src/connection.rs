@@ -5,6 +5,8 @@
 pub mod io_traits;
 pub mod tcp;
 
+use log::{warn, error};
+
 use tokio::{
     net::{TcpStream},
     sync::{oneshot},
@@ -151,7 +153,7 @@ impl ConnectionManager {
                     self.next_json_connection_id = match id.checked_add(1) {
                         Some(new_next_id) => new_next_id,
                         None => {
-                            eprintln!("Warning: Couldn't handle a new connection because there is no new connection ID numbers.");
+                            warn!("Warning: Couldn't handle a new connection because there is no new connection ID numbers.");
                             return;
                         }
                     };
@@ -184,7 +186,7 @@ impl ConnectionManager {
                             self.r_sender.send_device_manager_event(e).await;
                         }
                         Ok(Err(e)) | Err(e) => {
-                            eprintln!("Error: {:?}", e);
+                            error!("Error: {:?}", e);
                         }
                     }
                 }
@@ -193,7 +195,7 @@ impl ConnectionManager {
                 let stream = match TcpStream::connect(address).await {
                     Ok(stream) => stream,
                     Err(e) => {
-                        eprintln!("ConnectTo error: {}", e);
+                        error!("ConnectTo error: {}", e);
                         return;
                     }
                 };
@@ -212,7 +214,7 @@ impl ConnectionManager {
                 let stream = match TcpStream::connect(address).await {
                     Ok(stream) => stream,
                     Err(e) => {
-                        eprintln!("ConnectToData error: {}", e);
+                        error!("ConnectToData error: {}", e);
                         return;
                     }
                 };
