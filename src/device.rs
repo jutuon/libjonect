@@ -22,7 +22,7 @@ use std::{
 
 use crate::{
     config::{LogicConfig},
-    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent, tcp::TcpSendHandle}, ui::UiEvent,
+    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent, tcp::TcpSendHandle}, ui::{UiEvent, AndroidAudioInfo},
 };
 
 use self::{
@@ -69,7 +69,7 @@ pub enum DeviceManagerEvent {
     RunDeviceConnectionPing,
     NewDeviceConnection(JsonConnection),
     NewDataConnection(ConnectionId, TcpSendHandle),
-    UiNativeSampleRate(ConnectionId, i32),
+    UiNativeSampleRate(ConnectionId, AndroidAudioInfo),
     DisconnectAllDevices,
 }
 

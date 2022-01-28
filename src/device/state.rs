@@ -20,12 +20,12 @@ use crate::{
     utils::{
         Connection, ConnectionEvent, ConnectionHandle, ConnectionId, QuitReceiver, QuitSender,
         SendDownward,
-    }, connection::{JsonConnection, tcp::TcpSendHandle, ConnectionManagerEvent}, ui::{ValueRequest, UiEvent},
+    }, connection::{JsonConnection, tcp::TcpSendHandle, ConnectionManagerEvent}, ui::{ValueRequest, UiEvent, AndroidAudioInfo},
 };
 
 use super::{
     protocol::{
-        AudioFormat, AudioStreamInfo, DeviceMessage, NativeSampleRate,
+        AudioFormat, AudioStreamInfo, DeviceMessage, NativeSampleRate, UnsupportedFormat,
     },
     DeviceManagerInternalEvent,
 };
@@ -35,7 +35,7 @@ use super::{
 pub enum DeviceEvent {
     NewDataConnection(TcpSendHandle),
     SendPing,
-    UiNativeSampleRate(i32),
+    UiNativeSampleRate(AndroidAudioInfo),
     Disconnect,
 }
 
@@ -65,6 +65,28 @@ enum QuitMode {
     ConnectionError,
 }
 
+enum AudioInfoRequestMessages {
+    Device(DeviceMessage),
+    Connect(ConnectionManagerEvent),
+}
+
+impl AudioInfoRequestMessages {
+    async fn handle(
+        self,
+        connection_handle: &mut ConnectionHandle<DeviceMessage>,
+        r_sender: &mut RouterSender,
+    ) {
+        match self {
+            AudioInfoRequestMessages::Connect(m) => {
+                r_sender.send_connection_manager_event(m).await;
+            }
+            AudioInfoRequestMessages::Device(m) => {
+                connection_handle.send_down(m).await;
+            }
+        }
+    }
+}
+
 /// Logic for handling one connected device.
 pub struct DeviceStateTask {
     id: ConnectionId,
@@ -76,8 +98,9 @@ pub struct DeviceStateTask {
     event_receiver: mpsc::Receiver<DeviceEvent>,
     connection_receiver: mpsc::Receiver<ConnectionEvent<DeviceMessage>>,
     config: Arc<LogicConfig>,
-    native_sample_rate: Option<i32>,
-    ui_native_sample_rate: ValueRequest<i32, DeviceMessage>,
+    recording_native_sample_rate: Option<i32>,
+    android_audio_info: ValueRequest<AndroidAudioInfo, AudioInfoRequestMessages>,
+    audio_stream_info: Option<AudioStreamInfo>,
 }
 
 impl DeviceStateTask {
@@ -114,8 +137,9 @@ impl DeviceStateTask {
             event_sender: event_sender.clone(),
             connection_receiver,
             config,
-            native_sample_rate: None,
-            ui_native_sample_rate: ValueRequest::new(),
+            recording_native_sample_rate: None,
+            android_audio_info: ValueRequest::new(),
+            audio_stream_info: None,
         };
 
         let task_handle = tokio::spawn(device_task.run(quit_receiver));
@@ -195,15 +219,49 @@ impl DeviceStateTask {
                     self.r_sender
                         .send_audio_server_event(AudioEvent::StartRecording {
                             send_handle,
-                            sample_rate: self.native_sample_rate.unwrap() as u32,
+                            sample_rate: self.recording_native_sample_rate.unwrap() as u32,
                         })
                         .await;
                 } else {
-                    self.r_sender
-                        .send_audio_server_event(AudioEvent::PlayAudio {
-                            send_handle,
-                        })
-                        .await;
+                    // DeviceMessage::PlayAudioStream(info) should be received
+                    // before running the following code.
+
+                    if let Some(info) = &self.audio_stream_info {
+                        if info.channels != 2 {
+                            error!("Non stereo audio streams are not supported.");
+                            return None;
+                        }
+
+                        match info.rate {
+                            44100 | 48000 => (),
+                            rate => {
+                                error!("Unsupported audio stream sample rate {}.", rate);
+                                return None;
+                            },
+                        };
+
+                        let decode_opus = match info.try_parse_audio_format() {
+                            Ok(AudioFormat::Opus) => true,
+                            Ok(AudioFormat::Pcm) => false,
+                            Err(UnsupportedFormat) => return None,
+                        };
+
+                        let frames_per_burst = self.android_audio_info
+                            .current_value()
+                            .as_ref()
+                            .unwrap().frames_per_burst;
+
+                        self.r_sender
+                            .send_audio_server_event(AudioEvent::PlayAudio {
+                                send_handle,
+                                sample_rate: info.rate as i32,
+                                frames_per_burst,
+                                decode_opus,
+                            })
+                            .await;
+                    }
+
+
                 }
             }
             DeviceEvent::SendPing => {
@@ -213,8 +271,8 @@ impl DeviceStateTask {
                 }
             }
             DeviceEvent::UiNativeSampleRate(native_sample_rate) => {
-                for message in self.ui_native_sample_rate.set_value(native_sample_rate) {
-                    self.connection_handle.send_down(message).await;
+                for message in self.android_audio_info.set_value(native_sample_rate) {
+                    message.handle(&mut self.connection_handle, &mut self.r_sender).await;
                 }
             }
             DeviceEvent::Disconnect => {
@@ -240,7 +298,7 @@ impl DeviceStateTask {
                         || native_sample_rate == 48000
                 );
 
-                self.native_sample_rate = Some(native_sample_rate);
+                self.recording_native_sample_rate = Some(native_sample_rate);
 
                 let mut sample_rate = native_sample_rate as u32;
 
@@ -260,11 +318,15 @@ impl DeviceStateTask {
                 self.audio_out = Some(());
             }
             DeviceMessage::GetNativeSampleRate => {
-                let message = self.ui_native_sample_rate.request(
-                    |value| DeviceMessage::NativeSampleRate(NativeSampleRate::new(*value))
+                let message = self.android_audio_info.request(|value| {
+                        let m = NativeSampleRate::new(value.native_sample_rate);
+                        let m = DeviceMessage::NativeSampleRate(m);
+                        AudioInfoRequestMessages::Device(m)
+                    }
                 );
+
                 if let Some(message) = message {
-                    self.connection_handle.send_down(message).await;
+                    message.handle(&mut self.connection_handle, &mut self.r_sender).await;
                 } else {
                     self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
                         who_sent_this: self.id,
@@ -286,11 +348,22 @@ impl DeviceStateTask {
                 error!("AudioStreamPlayError {:?}", error);
             }
             DeviceMessage::PlayAudioStream(info) => {
-                self.r_sender
-                    .send_connection_manager_event(ConnectionManagerEvent::ConnectToData {
-                        id: self.id
-                    })
-                    .await;
+                self.audio_stream_info = Some(info);
+
+                let id = self.id;
+                let message = self.android_audio_info.request(move |value| {
+                        let m = ConnectionManagerEvent::ConnectToData { id };
+                        AudioInfoRequestMessages::Connect(m)
+                    }
+                );
+
+                if let Some(message) = message {
+                    message.handle(&mut self.connection_handle, &mut self.r_sender).await;
+                } else {
+                    self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
+                        who_sent_this: self.id,
+                    }).await;
+                }
             }
         }
     }

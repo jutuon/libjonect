@@ -173,6 +173,10 @@ impl TcpSendHandle {
     pub fn tokio_tcp(self) -> TcpStream {
         TcpStream::from_std(self.tcp_stream).unwrap()
     }
+
+    pub fn set_blocking(&mut self) -> Result<(), io::Error> {
+        self.tcp_stream.set_nonblocking(false)
+    }
 }
 
 impl std::io::Write for TcpSendHandle {
@@ -182,6 +186,12 @@ impl std::io::Write for TcpSendHandle {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.tcp_stream.flush()
+    }
+}
+
+impl std::io::Read for TcpSendHandle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.tcp_stream.read(buf)
     }
 }
 

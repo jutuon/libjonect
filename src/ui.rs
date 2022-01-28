@@ -34,7 +34,9 @@ pub enum UiProtocolFromServerToUi {
     DeviceConnectionEstablished,
     DeviceConnectionDisconnected,
     DeviceConnectionDisconnectedWithError,
-    AndroidGetNativeSampleRate,
+    AndroidGetNativeSampleRate {
+        message_from: String,
+    },
 }
 
 /// UI message from UI to server.
@@ -45,8 +47,15 @@ pub enum UiProtocolFromUiToServer {
     RunDeviceConnectionPing,
     DisconnectDevice,
     ConnectTo { ip_address: String },
-    AndroidNativeSampleRate { native_sample_rate: i32 },
+    AndroidNativeSampleRate(AndroidAudioInfo),
 
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AndroidAudioInfo {
+    pub native_sample_rate: i32,
+    pub frames_per_burst: i32,
+    pub message_to: String,
 }
 
 /// Event to `UiConnectionManager`.
@@ -69,7 +78,6 @@ enum QuitReason {
 pub struct UiConnectionManager {
     r_sender: RouterSender,
     ui_receiver: MessageReceiver<UiEvent>,
-    native_sample_rate: ValueRequest<i32, DeviceManagerEvent>,
 }
 
 impl UiConnectionManager {
@@ -83,7 +91,6 @@ impl UiConnectionManager {
         let cm = Self {
             r_sender: server_sender,
             ui_receiver,
-            native_sample_rate: ValueRequest::new(),
         };
 
         let task = async move {
@@ -156,18 +163,9 @@ impl UiConnectionManager {
                             continue;
                         }
                         UiEvent::GetNativeSampleRate { who_sent_this } => {
-                            // TODO: Remove native_sample_rate:
-                            // ValueRequest<i32, DeviceManagerEvent>? It
-                            // probably would be more clear if event is sent
-                            // every time to the UI.
-
-                            if let Some(message) = self.native_sample_rate.request(
-                                move |value| DeviceManagerEvent::UiNativeSampleRate(who_sent_this, *value)
-                            ) {
-                                self.r_sender.send_device_manager_event(message).await
-                            } else {
-                                connection_handle.send_down(UiProtocolFromServerToUi::AndroidGetNativeSampleRate).await;
-                            }
+                            connection_handle.send_down(UiProtocolFromServerToUi::AndroidGetNativeSampleRate {
+                                message_from: who_sent_this.to_string(),
+                            }).await;
                         }
                         UiEvent::ConnectionError { .. } => {
                             connection_handle.send_down(UiProtocolFromServerToUi::DeviceConnectionDisconnectedWithError).await;
@@ -219,12 +217,23 @@ impl UiConnectionManager {
                 info!("UI notification");
             }
             UiProtocolFromUiToServer::RunDeviceConnectionPing => {
-                self.r_sender.send_device_manager_event(DeviceManagerEvent::RunDeviceConnectionPing).await;
+                self.r_sender.send_device_manager_event(
+                    DeviceManagerEvent::RunDeviceConnectionPing
+                ).await;
             }
-            UiProtocolFromUiToServer::AndroidNativeSampleRate { native_sample_rate } => {
-                for message in self.native_sample_rate.set_value(native_sample_rate) {
-                    self.r_sender.send_device_manager_event(message).await
-                }
+            UiProtocolFromUiToServer::AndroidNativeSampleRate(audio_info) => {
+                let id: ConnectionId = match audio_info.message_to.parse() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        error!("AndroidNativeSampleRate field message_to is not valid. Error: {}", e);
+                        return;
+                    }
+                };
+
+                let message = DeviceManagerEvent::UiNativeSampleRate(
+                    id, audio_info
+                );
+                self.r_sender.send_device_manager_event(message).await;
             }
             UiProtocolFromUiToServer::ConnectTo { ip_address } => {
                 let address_str = format!("{}:{}", ip_address, crate::config::JSON_PORT);
@@ -284,5 +293,9 @@ impl <T: 'static, M> ValueRequest<T, M> {
         self.request.drain(..).map(move |handler| {
             (handler)(value)
         })
+    }
+
+    pub fn current_value(&self) -> &Option<T> {
+        &self.value
     }
 }

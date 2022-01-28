@@ -187,6 +187,7 @@ impl PAStreamManager {
         send_handle: &mut TcpSendHandle,
     ) -> Result<(), StreamError> {
         loop {
+            // TODO: Add limit to the buffer.
             if data_write_buffer.has_remaining() {
                 match send_handle.write(data_write_buffer.chunk()) {
                     Ok(count) => {

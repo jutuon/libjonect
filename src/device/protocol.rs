@@ -37,6 +37,23 @@ impl AudioFormat {
     }
 }
 
+
+pub struct UnsupportedFormat;
+
+impl TryFrom<&str> for AudioFormat {
+    type Error = UnsupportedFormat;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let format = match value {
+            "pcm-s16le" => Self::Pcm,
+            "opus" => Self::Opus,
+            _ => return Err(UnsupportedFormat),
+        };
+
+        Ok(format)
+    }
+}
+
+
 /// Server informs the client about available audio stream.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AudioStreamInfo {
@@ -44,13 +61,13 @@ pub struct AudioStreamInfo {
     /// * pcm-s16le - 16-bit little endian PCM samples.
     /// * opus - Opus encoded audio stream.
     format: String,
-    channels: u8,
+    pub channels: u8,
     /// Sample rate.
     ///
     /// Possible values:
     /// * 44100
     /// * 48000
-    rate: u32,
+    pub rate: u32,
     /// Server TCP port for the audio stream.
     pub port: u16,
 }
@@ -64,6 +81,10 @@ impl AudioStreamInfo {
             rate,
             port,
         }
+    }
+
+    pub fn try_parse_audio_format(&self) -> Result<AudioFormat, UnsupportedFormat> {
+        self.format.as_str().try_into()
     }
 }
 

@@ -7,6 +7,9 @@
 #[cfg(target_os = "linux")]
 mod pulseaudio;
 
+#[cfg(target_os = "android")]
+mod oboe;
+
 use log::{info, error};
 
 use std::sync::Arc;
@@ -36,6 +39,9 @@ pub enum AudioEvent {
     },
     PlayAudio {
         send_handle: TcpSendHandle,
+        sample_rate: i32,
+        frames_per_burst: i32,
+        decode_opus: bool,
     }
 }
 
@@ -157,23 +163,23 @@ impl AudioManager {
     /// Run `AudioManager` logic.
     #[cfg(target_os = "android")]
     async fn run(mut self) {
+        let mut oboe_thread = self::oboe::OboeThread::new();
+
+        let mut timer = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
                 result = &mut self.quit_receiver => break result.unwrap(),
                 event = self.audio_receiver.recv() => {
-                    if let AudioEvent::PlayAudio { send_handle } = event {
-                        Self::handle_data_connection(self.quit_receiver, send_handle.tokio_tcp()).await;
-                    }
-
-                    // TODO: This does not work when device is disconnected
-                    // and reconnected.
-                    return;
+                    oboe_thread.send_event(event)
+                }
+                event = timer.tick() => {
+                    oboe_thread.send_underrun_check_timer_tick();
                 }
             }
         }
 
-
+        oboe_thread.quit()
     }
 
 }
