@@ -4,6 +4,8 @@
 
 //! PulseAudio audio stream code.
 
+use log::{error,info};
+
 use std::{
     convert::TryInto,
     io::{ErrorKind, Write},

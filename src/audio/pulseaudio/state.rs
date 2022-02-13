@@ -4,6 +4,8 @@
 
 //! Store state related to PulseAudio.
 
+use log::{error,info};
+
 use std::{any::Any, collections::VecDeque};
 
 use gtk::glib::MainContext;

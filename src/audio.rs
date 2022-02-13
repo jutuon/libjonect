@@ -88,7 +88,7 @@ impl AudioManager {
                 tokio::select! {
                     result = &mut self.quit_receiver => break result.unwrap(),
                     event = self.audio_receiver.recv() => {
-                        if let AudioEvent::PlayAudio { send_handle } = event {
+                        if let AudioEvent::PlayAudio { send_handle, .. } = event {
                             Self::handle_data_connection(self.quit_receiver, send_handle.tokio_tcp()).await;
                         }
                         // TODO: This does not work when device is disconnected
