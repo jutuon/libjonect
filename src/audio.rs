@@ -40,9 +40,15 @@ pub enum AudioEvent {
     PlayAudio {
         send_handle: TcpSendHandle,
         sample_rate: i32,
-        frames_per_burst: i32,
+        android_info: Option<PlayAudioEventAndroid>,
         decode_opus: bool,
     }
+}
+
+/// Android specific information for `AudioEvent::PlayAudio`.
+#[derive(Debug)]
+pub struct PlayAudioEventAndroid {
+    pub frames_per_burst: i32,
 }
 
 /// Handle audio recording requests.

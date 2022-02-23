@@ -15,7 +15,7 @@ use tokio::{
 
 use crate::{
     config::{LogicConfig, EVENT_CHANNEL_SIZE},
-    audio::AudioEvent,
+    audio::{AudioEvent, PlayAudioEventAndroid},
     message_router::RouterSender,
     utils::{
         Connection, ConnectionEvent, ConnectionHandle, ConnectionId, QuitReceiver, QuitSender,
@@ -246,16 +246,24 @@ impl DeviceStateTask {
                             Err(UnsupportedFormat) => return None,
                         };
 
-                        let frames_per_burst = self.android_audio_info
+                        let android_info = if cfg!(target_os = "android") {
+                            let frames_per_burst = self.android_audio_info
                             .current_value()
                             .as_ref()
                             .unwrap().frames_per_burst;
+
+                            Some(PlayAudioEventAndroid {
+                                frames_per_burst,
+                            })
+                        } else {
+                            None
+                        };
 
                         self.r_sender
                             .send_audio_server_event(AudioEvent::PlayAudio {
                                 send_handle,
                                 sample_rate: info.rate as i32,
-                                frames_per_burst,
+                                android_info,
                                 decode_opus,
                             })
                             .await;
@@ -318,19 +326,27 @@ impl DeviceStateTask {
                 self.audio_out = Some(());
             }
             DeviceMessage::GetNativeSampleRate => {
-                let message = self.android_audio_info.request(|value| {
-                        let m = NativeSampleRate::new(value.native_sample_rate);
-                        let m = DeviceMessage::NativeSampleRate(m);
-                        AudioInfoRequestMessages::Device(m)
-                    }
-                );
+                if cfg!(target_os = "android") {
+                    let message = self.android_audio_info.request(|value| {
+                            let m = NativeSampleRate::new(value.native_sample_rate);
+                            let m = DeviceMessage::NativeSampleRate(m);
+                            AudioInfoRequestMessages::Device(m)
+                        }
+                    );
 
-                if let Some(message) = message {
-                    message.handle(&mut self.connection_handle, &mut self.r_sender).await;
+                    if let Some(message) = message {
+                        message.handle(&mut self.connection_handle, &mut self.r_sender).await;
+                    } else {
+                        self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
+                            who_sent_this: self.id,
+                        }).await;
+                    }
                 } else {
-                    self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
-                        who_sent_this: self.id,
-                    }).await;
+                    // TODO: Get real NativeSampleRate from PulseAudio.
+                    let m = NativeSampleRate::new(48000);
+                    let m = DeviceMessage::NativeSampleRate(m);
+                    let m = AudioInfoRequestMessages::Device(m);
+                    m.handle(&mut self.connection_handle, &mut self.r_sender).await;
                 }
             }
             DeviceMessage::Ping => {
@@ -351,19 +367,27 @@ impl DeviceStateTask {
                 self.audio_stream_info = Some(info);
 
                 let id = self.id;
-                let message = self.android_audio_info.request(move |value| {
-                        let m = ConnectionManagerEvent::ConnectToData { id };
-                        AudioInfoRequestMessages::Connect(m)
-                    }
-                );
 
-                if let Some(message) = message {
-                    message.handle(&mut self.connection_handle, &mut self.r_sender).await;
+                if cfg!(target_os = "android") {
+                    let message = self.android_audio_info.request(move |value| {
+                            let m = ConnectionManagerEvent::ConnectToData { id };
+                            AudioInfoRequestMessages::Connect(m)
+                        }
+                    );
+
+                    if let Some(message) = message {
+                        message.handle(&mut self.connection_handle, &mut self.r_sender).await;
+                    } else {
+                        self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
+                            who_sent_this: self.id,
+                        }).await;
+                    }
                 } else {
-                    self.r_sender.send_ui_event(crate::ui::UiEvent::GetNativeSampleRate {
-                        who_sent_this: self.id,
-                    }).await;
+                    let m = ConnectionManagerEvent::ConnectToData { id };
+                    let m = AudioInfoRequestMessages::Connect(m);
+                    m.handle(&mut self.connection_handle, &mut self.r_sender).await;
                 }
+
             }
         }
     }

@@ -113,10 +113,12 @@ impl UiConnectionManager {
             }
         };
 
-        // TODO: Drop UI messages when UI is not connected?
         loop {
             tokio::select! {
                 event = &mut quit_receiver => return event.unwrap(),
+                message = self.ui_receiver.recv() => {
+                    drop(message);
+                }
                 listener_result = listener.accept() => {
                     let socket = match listener_result {
                         Ok((socket, _)) => socket,
