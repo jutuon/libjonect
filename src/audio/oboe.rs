@@ -324,11 +324,13 @@ impl OboeLogic {
             AudioEvent::PlayAudio {
                 mut send_handle,
                 decode_opus,
-                frames_per_burst,
                 sample_rate,
+                android_info,
              } => {
                 // TODO: Opus decoding.
                 assert!(!decode_opus);
+
+                let frames_per_burst = android_info.unwrap().frames_per_burst;
 
                 if self.oboe_mode.is_some() {
                     error!("Can not play multiple audio streams simultaneously.");
