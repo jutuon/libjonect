@@ -26,12 +26,12 @@ use super::AudioEvent;
 
 use callback_mode::OboeCppCallbackMode;
 
-const OBOE_BUFFER_BURST_COUNT: i32 = 2;
+const OBOE_BUFFER_BURST_COUNT: i32 = 8;
 
 const SAMPLE_BYTE_COUNT: usize = 2;
 const AUDIO_CHANNEL_COUNT: usize = 2;
 /// Frame is two samples currently.
-const AUDIO_BLOCK_FRAME_COUNT: usize = 64;
+const AUDIO_BLOCK_FRAME_COUNT: usize = 8;
 const AUDIO_BLOCK_SAMPLE_COUNT: usize = AUDIO_BLOCK_FRAME_COUNT*AUDIO_CHANNEL_COUNT as usize;
 const AUDIO_BLOCK_SIZE_IN_BYTES: usize = AUDIO_BLOCK_FRAME_COUNT*AUDIO_CHANNEL_COUNT*SAMPLE_BYTE_COUNT;
 type AudioDataBlock = [i16; AUDIO_BLOCK_SAMPLE_COUNT];
