@@ -18,7 +18,9 @@ pub const AUDIO_DATA_SOCKET_ADDRESS: &str = "0.0.0.0:8082";
 /// Socket address UI connection.
 pub const UI_SOCKET_ADDRESS: &str = "127.0.0.1:8081";
 
-pub const DATA_PORT: u16 = 8082;
+pub const DATA_PORT_TCP: u16 = 8082;
+pub const DATA_PORT_UDP_SEND: u16 = 8082;
+pub const DATA_PORT_UDP_RECEIVE: u16 = 8083;
 pub const JSON_PORT: u16 = 8080;
 
 #[derive(Debug, Clone)]
@@ -28,4 +30,5 @@ pub struct LogicConfig {
     pub enable_connection_listening: bool,
     pub enable_ping: bool,
     pub connect_address: Option<SocketAddr>,
+    pub enable_udp_audio_data_sending: bool,
 }

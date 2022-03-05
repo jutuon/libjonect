@@ -256,14 +256,20 @@ impl DeviceStateTask {
                     AudioFormat::Pcm
                 };
 
-                let info = AudioStreamInfo::new(format, 2u8, sample_rate, 8082, DataConnectionType::Tcp);
+                let data_connection_type = if self.config.enable_udp_audio_data_sending {
+                    DataConnectionType::Udp
+                } else {
+                    DataConnectionType::Tcp
+                };
+
+                let info = AudioStreamInfo::new(format, 2u8, sample_rate, 8082, data_connection_type);
 
                 self.r_sender.send_connection_manager_event(ConnectionManagerEvent::SetNextResourceRequest {
                     id: self.id,
                     next_resource_request: NextResourceRequest::SendAudio {
                         sample_rate: self.recording_native_sample_rate.unwrap() as u32,
                     },
-                    data_connection_type: DataConnectionType::Tcp,
+                    data_connection_type,
                 }).await;
 
                 self.connection_handle
@@ -352,7 +358,7 @@ impl DeviceStateTask {
                         android_info,
                         decode_opus,
                     },
-                    data_connection_type: DataConnectionType::Tcp,
+                    data_connection_type: info.data_connection_type,
                 };
                 let m = AudioInfoRequestMessages::Connect(m);
 

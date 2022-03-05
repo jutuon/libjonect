@@ -27,7 +27,7 @@ use crate::{
     utils::{ConnectionId, QuitReceiver, QuitSender}, connection::tcp::ConnectionListener, device::DeviceManagerEvent, audio::{AudioEvent, PlayAudioEventAndroid},
 };
 
-use self::{tcp::{ListenerError, ConnectionListenerHandle}, data::tcp::TcpDataConnectionBuilder};
+use self::{tcp::{ListenerError, ConnectionListenerHandle}, data::{tcp::TcpDataConnectionBuilder, udp::UdpManager}};
 
 use super::{
     message_router::{MessageReceiver, RouterSender},
@@ -75,20 +75,26 @@ enum CmInternalEvent {
     NewDataStream(TcpStream, SocketAddr),
 }
 
-pub struct ResourceHandle {
-    connection_id: ConnectionId,
-}
-
 type AudioQuitEvent = AudioEvent;
 
 pub struct ResourceManager {
+    udp_manager: Option<UdpManager>,
     play_audio: Option<(ConnectionId, AudioQuitEvent)>,
     send_audio: Option<(ConnectionId, AudioQuitEvent)>,
 }
 
 impl ResourceManager {
     fn new() -> Self {
+        let udp_manager = match UdpManager::new() {
+            Ok(udp_manager) => Some(udp_manager),
+            Err(e) => {
+                error!("UDP support disabled: {:?}", e);
+                None
+            }
+        };
+
         Self {
+            udp_manager,
             play_audio: None,
             send_audio: None,
         }
@@ -130,6 +136,14 @@ impl ResourceManager {
                 self.send_audio = Some((resource_connection_id, event));
             }
         }
+    }
+
+    fn udp_manager(&self) -> Option<&UdpManager> {
+        self.udp_manager.as_ref()
+    }
+
+    fn udp_manager_mut(&mut self) -> Option<&mut UdpManager> {
+        self.udp_manager.as_mut()
     }
 }
 
@@ -216,7 +230,70 @@ impl ConnectionResources {
                 self.pending_data_connection_tcp = Some(stream);
                 None
             },
-            _ => unimplemented!(),
+            (Some((NextResourceRequest::SendAudio { sample_rate }, DataConnectionType::Udp)), pending_data_connection_tcp) => {
+                self.pending_data_connection_tcp = pending_data_connection_tcp;
+
+                if resource_manager.connect_send_audio(self.id).is_ok() {
+                    if let Some(udp_manager) = resource_manager.udp_manager_mut() {
+                        match udp_manager.build_mode_send(self.ip) {
+                            Ok(send_handle) => {
+                                Some(AudioEvent::StartRecording {
+                                    send_handle,
+                                    sample_rate,
+                                })
+                            },
+                            Err(e) => {
+                                error!("UDP error: {:?}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        warn!("UDP support is disabled");
+                        None
+                    }
+                } else {
+                    warn!("SendAudio resource is not available.");
+                    None
+                }
+            }
+            (
+                Some((
+                NextResourceRequest::PlayAudio {
+                    sample_rate,
+                    android_info,
+                    decode_opus
+                },
+                DataConnectionType::Udp
+                )), pending_data_connection_tcp
+            ) => {
+                self.pending_data_connection_tcp = pending_data_connection_tcp;
+
+                if resource_manager.connect_play_audio(self.id).is_ok() {
+                    if let Some(udp_manager) = resource_manager.udp_manager_mut() {
+                        match udp_manager.build_mode_receive(self.ip) {
+                            Ok(send_handle) => {
+                                Some(AudioEvent::PlayAudio {
+                                    send_handle,
+                                    sample_rate,
+                                    android_info,
+                                    decode_opus,
+                                })
+                            },
+                            Err(e) => {
+                                error!("UDP error: {:?}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        warn!("UDP support is disabled");
+                        None
+                    }
+                } else {
+                    warn!("PlayAudio resource is not available.");
+                    None
+                }
+            }
+            (None, None) => None,
         }
 
 
@@ -382,7 +459,7 @@ impl ConnectionManager {
                     DataConnectionType::Tcp => {
                         let address = if let Some(connection_resources) = self.json_connections.get_mut(&id) {
                             connection_resources.set_next_resource_request(next_resource_request, data_connection_type);
-                            (connection_resources.ip(), crate::config::DATA_PORT).into()
+                            (connection_resources.ip(), crate::config::DATA_PORT_TCP).into()
                         } else {
                             return;
                         };
@@ -400,7 +477,12 @@ impl ConnectionManager {
                         ).await;
                     },
                     DataConnectionType::Udp => {
-                        unimplemented!()
+                        if let Some(connection_resources) = self.json_connections.get_mut(&id) {
+                            connection_resources.set_next_resource_request(next_resource_request, data_connection_type);
+                            if let Some(event) = connection_resources.check_next_resource_request(&mut self.resource_manager) {
+                                self.r_sender.send_audio_server_event(event).await;
+                            }
+                        }
                     },
                 };
             }
@@ -417,6 +499,9 @@ impl ConnectionManager {
             } => {
                 if let Some(connection_resources) = self.json_connections.get_mut(&id) {
                     connection_resources.set_next_resource_request(next_resource_request, data_connection_type);
+                    if let Some(event) = connection_resources.check_next_resource_request(&mut self.resource_manager) {
+                        self.r_sender.send_audio_server_event(event).await;
+                    }
                 }
             }
         }
