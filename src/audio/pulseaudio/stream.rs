@@ -4,11 +4,11 @@
 
 //! PulseAudio audio stream code.
 
-use log::{error,info};
+use log::{error,info, warn};
 
 use std::{
     convert::TryInto,
-    io::{ErrorKind, Write},
+    io::{ErrorKind, Write}, num::Wrapping,
 };
 
 use audiopus::{coder::Encoder, SampleRate};
@@ -16,7 +16,7 @@ use bytes::{Buf, BytesMut};
 
 use pulse::{context::Context, def::BufferAttr, sample::Spec, stream::Stream};
 
-use crate::{audio::pulseaudio::state::PAEvent, connection::tcp::TcpSendHandle};
+use crate::{audio::pulseaudio::state::PAEvent, connection::data::{DataSender, DataSenderBuilder, MAX_PACKET_SIZE}};
 
 use super::EventToAudioServerSender;
 
@@ -50,11 +50,8 @@ pub enum StreamError {
 
 /// Logic for audio data streams.
 pub struct PAStreamManager {
-    record: Option<(Stream, TcpSendHandle)>,
+    record: Option<(Stream, DataSender)>,
     sender: EventToAudioServerSender,
-    /// Buffer used to buffer data which could not sent forward using single
-    /// write call.
-    data_write_buffer: BytesMut,
     /// If false do not read PCM data from PulseAudio.
     enable_recording: bool,
     /// If true send `PAEvent::StreamManagerQuitReady` when recording stream
@@ -65,6 +62,9 @@ pub struct PAStreamManager {
     encoder_buffer: Vec<i16>,
     /// Opus documentation recommends size 4000.
     encoder_output_buffer: Box<[u8; 4000]>,
+    audio_packet_drop_count: u64,
+    audio_packet_counter: Wrapping<u32>,
+    audio_packet_buffer: Vec<u8>,
 }
 
 impl PAStreamManager {
@@ -73,12 +73,14 @@ impl PAStreamManager {
         Self {
             record: None,
             sender,
-            data_write_buffer: BytesMut::new(),
             enable_recording: true,
             quit_requested: false,
             encoder: None,
             encoder_buffer: Vec::new(),
             encoder_output_buffer: Box::new([0; 4000]),
+            audio_packet_drop_count: 0,
+            audio_packet_counter: Wrapping(0),
+            audio_packet_buffer: Vec::new(),
         }
     }
 
@@ -87,7 +89,7 @@ impl PAStreamManager {
         &mut self,
         context: &mut Context,
         source_name: Option<String>,
-        send_handle: TcpSendHandle,
+        send_handle: DataSenderBuilder,
         encode_opus: bool,
         sample_rate: u32,
     ) {
@@ -151,9 +153,11 @@ impl PAStreamManager {
             s.send_pa_record_stream_event(PARecordingStreamEvent::Read(size));
         })));
 
-        self.data_write_buffer.clear();
-        self.record = Some((stream, send_handle));
+        self.record = Some((stream, send_handle.build()));
         self.enable_recording = true;
+        self.audio_packet_drop_count = 0;
+        self.audio_packet_counter = Wrapping(0);
+        self.audio_packet_buffer.clear();
     }
 
     /// Handle `PARecordingStreamEvent::StateChange`.
@@ -173,6 +177,11 @@ impl PAStreamManager {
                     self.sender.send_pa(PAEvent::StreamManagerQuitReady);
                 }
                 info!("Recording stream state: Terminated.");
+                if self.audio_packet_drop_count != 0 {
+                    info!("Audio packet drop count: {}", self.audio_packet_drop_count);
+                } else {
+                    warn!("Audio packet drop count: {}", self.audio_packet_drop_count);
+                }
             }
             State::Ready => {
                 info!("Recording from {:?}", stream.get_device_name());
@@ -185,43 +194,26 @@ impl PAStreamManager {
     /// write call will be buffered.
     fn handle_data(
         data: &[u8],
-        data_write_buffer: &mut BytesMut,
-        send_handle: &mut TcpSendHandle,
+        send_handle: &mut DataSender,
+        audio_packet_drop_count: &mut u64,
+        audio_packet_counter: &mut Wrapping<u32>,
+        audio_packet_buffer: &mut Vec<u8>,
     ) -> Result<(), StreamError> {
-        loop {
-            // TODO: Add limit to the buffer.
-            if data_write_buffer.has_remaining() {
-                match send_handle.write(data_write_buffer.chunk()) {
-                    Ok(count) => {
-                        data_write_buffer.advance(count);
-                    }
-                    Err(e) => {
-                        if ErrorKind::WouldBlock == e.kind() {
-                            break;
-                        } else {
-                            return Err(StreamError::SocketError(e));
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
-        }
+        assert!(data.len() <= MAX_PACKET_SIZE);
 
-        match send_handle.write(data) {
-            Ok(count) => {
-                if count < data.len() {
-                    let remaining_bytes = &data[count..];
-                    data_write_buffer.extend_from_slice(remaining_bytes);
-                    info!(
-                        "Recording state: buffering {} bytes.",
-                        remaining_bytes.len()
-                    );
-                }
-            }
+        audio_packet_buffer.clear();
+
+        let packet_number = audio_packet_counter.0;
+        *audio_packet_counter += Wrapping(1);
+
+        audio_packet_buffer.extend_from_slice(&packet_number.to_be_bytes());
+        audio_packet_buffer.extend_from_slice(data);
+
+        match send_handle.send_packet(audio_packet_buffer) {
+            Ok(()) => (),
             Err(e) => {
                 if ErrorKind::WouldBlock == e.kind() {
-                    data_write_buffer.extend_from_slice(data);
+                    *audio_packet_drop_count += 1;
                 } else {
                     return Err(StreamError::SocketError(e));
                 }
@@ -237,8 +229,10 @@ impl PAStreamManager {
         encoding_buffer: &mut Vec<i16>,
         encoder_output_buffer: &mut [u8; 4000],
         encoder: &mut Encoder,
-        data_write_buffer: &mut BytesMut,
-        send_handle: &mut TcpSendHandle,
+        send_handle: &mut DataSender,
+        audio_packet_drop_count: &mut u64,
+        audio_packet_counter: &mut Wrapping<u32>,
+        audio_packet_buffer: &mut Vec<u8>,
     ) -> Result<(), StreamError> {
         if data.len() % 2 != 0 {
             return Err(StreamError::NotEnoughBytesForOneSample);
@@ -260,13 +254,12 @@ impl PAStreamManager {
 
                 encoding_buffer.clear();
 
-                let protocol_size: i32 = size.try_into().unwrap();
-
-                Self::handle_data(&protocol_size.to_be_bytes(), data_write_buffer, send_handle)?;
                 Self::handle_data(
                     &encoder_output_buffer[..size],
-                    data_write_buffer,
                     send_handle,
+                    audio_packet_drop_count,
+                    audio_packet_counter,
+                    audio_packet_buffer,
                 )?;
             }
         }
@@ -297,11 +290,19 @@ impl PAStreamManager {
                             &mut self.encoder_buffer,
                             &mut self.encoder_output_buffer,
                             encoder,
-                            &mut self.data_write_buffer,
                             send_handle,
+                            &mut self.audio_packet_drop_count,
+                            &mut self.audio_packet_counter,
+                            &mut self.audio_packet_buffer,
                         )
                     } else {
-                        Self::handle_data(data, &mut self.data_write_buffer, send_handle)
+                        Self::handle_data(
+                            data,
+                            send_handle,
+                            &mut self.audio_packet_drop_count,
+                            &mut self.audio_packet_counter,
+                            &mut self.audio_packet_buffer,
+                        )
                     };
 
                     match result {

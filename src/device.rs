@@ -22,7 +22,7 @@ use std::{
 
 use crate::{
     config::{LogicConfig},
-    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent, tcp::TcpSendHandle}, ui::{UiEvent, AndroidAudioInfo},
+    utils::{ConnectionId, QuitReceiver, QuitSender}, connection::{JsonConnection, ConnectionManagerEvent}, ui::{UiEvent, AndroidAudioInfo},
 };
 
 use self::{
@@ -68,7 +68,6 @@ impl From<DeviceManagerInternalEvent> for DmEvent {
 pub enum DeviceManagerEvent {
     RunDeviceConnectionPing,
     NewDeviceConnection(JsonConnection),
-    NewDataConnection(ConnectionId, TcpSendHandle),
     UiNativeSampleRate(ConnectionId, AndroidAudioInfo),
     DisconnectAllDevices,
 }
@@ -155,11 +154,6 @@ impl DeviceManager {
                     .await;
 
                     self.connections.insert(id, device_state);
-                }
-                DeviceManagerEvent::NewDataConnection(id, handle) => {
-                    if let Some(device) = self.connections.get_mut(&id) {
-                        device.send(DeviceEvent::NewDataConnection(handle)).await;
-                    }
                 }
                 DeviceManagerEvent::UiNativeSampleRate(id, native_sample_rate) => {
                     if let Some(device) = self.connections.get_mut(&id) {

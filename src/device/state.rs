@@ -20,7 +20,7 @@ use crate::{
     utils::{
         Connection, ConnectionEvent, ConnectionHandle, ConnectionId, QuitReceiver, QuitSender,
         SendDownward,
-    }, connection::{JsonConnection, tcp::TcpSendHandle, ConnectionManagerEvent}, ui::{ValueRequest, UiEvent, AndroidAudioInfo},
+    }, connection::{JsonConnection, ConnectionManagerEvent, DataConnectionType, NextResourceRequest}, ui::{ValueRequest, UiEvent, AndroidAudioInfo},
 };
 
 use super::{
@@ -33,7 +33,6 @@ use super::{
 /// Event to `DeviceStateTask`.
 #[derive(Debug)]
 pub enum DeviceEvent {
-    NewDataConnection(TcpSendHandle),
     SendPing,
     UiNativeSampleRate(AndroidAudioInfo),
     Disconnect,
@@ -100,7 +99,6 @@ pub struct DeviceStateTask {
     config: Arc<LogicConfig>,
     recording_native_sample_rate: Option<i32>,
     android_audio_info: ValueRequest<AndroidAudioInfo, AudioInfoRequestMessages>,
-    audio_stream_info: Option<AudioStreamInfo>,
 }
 
 impl DeviceStateTask {
@@ -139,7 +137,6 @@ impl DeviceStateTask {
             config,
             recording_native_sample_rate: None,
             android_audio_info: ValueRequest::new(),
-            audio_stream_info: None,
         };
 
         let task_handle = tokio::spawn(device_task.run(quit_receiver));
@@ -214,64 +211,6 @@ impl DeviceStateTask {
     /// Handle `DeviceEvent`.
     async fn handle_device_event(&mut self, event: DeviceEvent) -> Option<QuitMode> {
         match event {
-            DeviceEvent::NewDataConnection(send_handle) => {
-                if self.audio_out.is_some() {
-                    self.r_sender
-                        .send_audio_server_event(AudioEvent::StartRecording {
-                            send_handle,
-                            sample_rate: self.recording_native_sample_rate.unwrap() as u32,
-                        })
-                        .await;
-                } else {
-                    // DeviceMessage::PlayAudioStream(info) should be received
-                    // before running the following code.
-
-                    if let Some(info) = &self.audio_stream_info {
-                        if info.channels != 2 {
-                            error!("Non stereo audio streams are not supported.");
-                            return None;
-                        }
-
-                        match info.rate {
-                            44100 | 48000 => (),
-                            rate => {
-                                error!("Unsupported audio stream sample rate {}.", rate);
-                                return None;
-                            },
-                        };
-
-                        let decode_opus = match info.try_parse_audio_format() {
-                            Ok(AudioFormat::Opus) => true,
-                            Ok(AudioFormat::Pcm) => false,
-                            Err(UnsupportedFormat) => return None,
-                        };
-
-                        let android_info = if cfg!(target_os = "android") {
-                            let frames_per_burst = self.android_audio_info
-                            .current_value()
-                            .as_ref()
-                            .unwrap().frames_per_burst;
-
-                            Some(PlayAudioEventAndroid {
-                                frames_per_burst,
-                            })
-                        } else {
-                            None
-                        };
-
-                        self.r_sender
-                            .send_audio_server_event(AudioEvent::PlayAudio {
-                                send_handle,
-                                sample_rate: info.rate as i32,
-                                android_info,
-                                decode_opus,
-                            })
-                            .await;
-                    }
-
-
-                }
-            }
             DeviceEvent::SendPing => {
                 if self.ping_state.is_none() {
                     self.connection_handle.send_down(DeviceMessage::Ping).await;
@@ -317,7 +256,15 @@ impl DeviceStateTask {
                     AudioFormat::Pcm
                 };
 
-                let info = AudioStreamInfo::new(format, 2u8, sample_rate, 8082);
+                let info = AudioStreamInfo::new(format, 2u8, sample_rate, 8082, DataConnectionType::Tcp);
+
+                self.r_sender.send_connection_manager_event(ConnectionManagerEvent::SetNextResourceRequest {
+                    id: self.id,
+                    next_resource_request: NextResourceRequest::SendAudio {
+                        sample_rate: self.recording_native_sample_rate.unwrap() as u32,
+                    },
+                    data_connection_type: DataConnectionType::Tcp,
+                }).await;
 
                 self.connection_handle
                     .send_down(DeviceMessage::PlayAudioStream(info))
@@ -364,16 +311,53 @@ impl DeviceStateTask {
                 error!("AudioStreamPlayError {:?}", error);
             }
             DeviceMessage::PlayAudioStream(info) => {
-                self.audio_stream_info = Some(info);
-
                 let id = self.id;
 
+                if info.channels != 2 {
+                    error!("Non stereo audio streams are not supported.");
+                    return;
+                }
+
+                match info.rate {
+                    44100 | 48000 => (),
+                    rate => {
+                        error!("Unsupported audio stream sample rate {}.", rate);
+                        return;
+                    },
+                };
+
+                let decode_opus = match info.try_parse_audio_format() {
+                    Ok(AudioFormat::Opus) => true,
+                    Ok(AudioFormat::Pcm) => false,
+                    Err(UnsupportedFormat) => return,
+                };
+
+                let android_info = if cfg!(target_os = "android") {
+                    let frames_per_burst = self.android_audio_info
+                    .current_value()
+                    .as_ref()
+                    .unwrap().frames_per_burst;
+
+                    Some(PlayAudioEventAndroid {
+                        frames_per_burst,
+                    })
+                } else {
+                    None
+                };
+
+                let m = ConnectionManagerEvent::ConnectToData {
+                    id,
+                    next_resource_request: NextResourceRequest::PlayAudio {
+                        sample_rate: info.rate as i32,
+                        android_info,
+                        decode_opus,
+                    },
+                    data_connection_type: DataConnectionType::Tcp,
+                };
+                let m = AudioInfoRequestMessages::Connect(m);
+
                 if cfg!(target_os = "android") {
-                    let message = self.android_audio_info.request(move |value| {
-                            let m = ConnectionManagerEvent::ConnectToData { id };
-                            AudioInfoRequestMessages::Connect(m)
-                        }
-                    );
+                    let message = self.android_audio_info.request(move |value| m);
 
                     if let Some(message) = message {
                         message.handle(&mut self.connection_handle, &mut self.r_sender).await;
@@ -383,8 +367,6 @@ impl DeviceStateTask {
                         }).await;
                     }
                 } else {
-                    let m = ConnectionManagerEvent::ConnectToData { id };
-                    let m = AudioInfoRequestMessages::Connect(m);
                     m.handle(&mut self.connection_handle, &mut self.r_sender).await;
                 }
 

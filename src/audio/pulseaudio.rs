@@ -93,7 +93,7 @@ impl AudioServer {
                     AudioEvent::StopRecording => {
                         pa_state.stop_recording();
                     }
-                    AudioEvent::Message(_) | AudioEvent::PlayAudio {..} => (),
+                    AudioEvent::Message(_) | AudioEvent::PlayAudio {..} | AudioEvent::StopPlayingAudio => (),
                 },
                 AudioServerEvent::PAEvent(event) => {
                     pa_state.handle_pa_event(event);

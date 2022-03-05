@@ -12,18 +12,19 @@ mod oboe;
 
 use log::{info, error};
 
+use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use tokio::net::TcpStream;
 use tokio::sync::oneshot;
-use tokio::io::AsyncReadExt;
 
-use crate::connection::tcp::TcpSendHandle;
 use super::message_router::MessageReceiver;
 use super::message_router::RouterSender;
 use crate::config::LogicConfig;
+use crate::connection::data::DataReceiverBuilder;
+use crate::connection::data::DataSenderBuilder;
+use crate::connection::data::MAX_PACKET_SIZE;
 use crate::utils::QuitReceiver;
 use crate::utils::QuitSender;
 
@@ -34,19 +35,20 @@ pub enum AudioEvent {
     Message(String),
     StopRecording,
     StartRecording {
-        send_handle: TcpSendHandle,
+        send_handle: DataSenderBuilder,
         sample_rate: u32,
     },
     PlayAudio {
-        send_handle: TcpSendHandle,
+        send_handle: DataReceiverBuilder,
         sample_rate: i32,
         android_info: Option<PlayAudioEventAndroid>,
         decode_opus: bool,
-    }
+    },
+    StopPlayingAudio,
 }
 
 /// Android specific information for `AudioEvent::PlayAudio`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct PlayAudioEventAndroid {
     pub frames_per_burst: i32,
 }
@@ -95,7 +97,7 @@ impl AudioManager {
                     result = &mut self.quit_receiver => break result.unwrap(),
                     event = self.audio_receiver.recv() => {
                         if let AudioEvent::PlayAudio { send_handle, .. } = event {
-                            Self::handle_data_connection(self.quit_receiver, send_handle.tokio_tcp()).await;
+                            Self::handle_data_connection(self.quit_receiver, send_handle).await;
                         }
                         // TODO: This does not work when device is disconnected
                         // and reconnected.
@@ -124,39 +126,54 @@ impl AudioManager {
     /// Data connection handler task.
     async fn handle_data_connection(
         mut quit_receiver: oneshot::Receiver<()>,
-        mut connection: TcpStream,
+        mut connection: DataReceiverBuilder,
     ) {
-        let mut buffer = [0; 1024];
+        connection.set_timeout(Some(Duration::from_millis(1))).unwrap();
+        let mut connection = connection.build();
+
+        let mut timer = tokio::time::interval(Duration::from_millis(1));
+
+        let mut buffer = vec![0; MAX_PACKET_SIZE];
         let mut bytes_per_second: u64 = 0;
         let mut data_count_time: Option<Instant> = None;
 
-        loop {
+        'main_loop: loop {
             tokio::select! {
                 result = &mut quit_receiver => return result.unwrap(),
-                result = connection.read(&mut buffer) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(size) => {
-                            bytes_per_second += size as u64;
+                _ = timer.tick() => {
+                    'read_loop: loop {
+                        match connection.recv_packet(&mut buffer) {
+                            Ok(0) => break 'main_loop,
+                            Ok(size) => {
+                                // Minimum size should be 4 as packet counter is u32.
+                                bytes_per_second += (size - 4) as u64;
 
-                            match data_count_time {
-                                Some(time) => {
-                                    let now = Instant::now();
-                                    if now.duration_since(time) >= Duration::from_secs(1) {
-                                        let speed = (bytes_per_second as f64) / 1024.0 / 1024.0;
-                                        info!("Recording stream data speed: {} MiB/s", speed);
-                                        bytes_per_second = 0;
+                                match data_count_time {
+                                    Some(time) => {
+                                        let now = Instant::now();
+                                        if now.duration_since(time) >= Duration::from_secs(1) {
+                                            let speed = (bytes_per_second as f64) / 1024.0 / 1024.0;
+                                            info!("Recording stream data speed: {} MiB/s", speed);
+                                            bytes_per_second = 0;
+                                            data_count_time = Some(Instant::now());
+                                        }
+                                    }
+                                    None => {
                                         data_count_time = Some(Instant::now());
                                     }
                                 }
-                                None => {
-                                    data_count_time = Some(Instant::now());
+                            }
+                            Err(e) => {
+                                match e.kind() {
+                                    ErrorKind::WouldBlock => {
+                                        break 'read_loop;
+                                    }
+                                    _ => {
+                                        error!("Data connection error: {}", e);
+                                        break 'main_loop;
+                                    },
                                 }
                             }
-                        }
-                        Err(e) => {
-                            error!("Data connection error: {}", e);
-                            break;
                         }
                     }
                 }

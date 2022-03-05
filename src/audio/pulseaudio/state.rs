@@ -22,7 +22,7 @@ use super::{
     AudioEvent, EventToAudioServerSender,
 };
 
-use crate::{audio::pulseaudio::AudioServerEvent, connection::tcp::TcpSendHandle};
+use crate::{audio::pulseaudio::AudioServerEvent, connection::data::DataSenderBuilder};
 
 /// PulseAudio code events.
 #[derive(Debug)]
@@ -171,7 +171,7 @@ impl PAState {
     pub fn start_recording(
         &mut self,
         source_name: Option<String>,
-        send_handle: TcpSendHandle,
+        send_handle: DataSenderBuilder,
         encode_opus: bool,
         sample_rate: u32,
     ) {

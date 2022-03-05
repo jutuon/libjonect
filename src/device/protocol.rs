@@ -19,6 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::connection::DataConnectionType;
+
 /// Available audio stream formats.
 pub enum AudioFormat {
     // 16-bit little endian PCM samples.
@@ -70,16 +72,18 @@ pub struct AudioStreamInfo {
     pub rate: u32,
     /// Server TCP port for the audio stream.
     pub port: u16,
+    pub data_connection_type: DataConnectionType,
 }
 
 impl AudioStreamInfo {
     // TODO: Use enum for sample rate.
-    pub fn new(format: AudioFormat, channels: u8, rate: u32, port: u16) -> Self {
+    pub fn new(format: AudioFormat, channels: u8, rate: u32, port: u16, data_connection_type: DataConnectionType) -> Self {
         Self {
             format: format.as_json_value().to_string(),
             channels,
             rate,
             port,
+            data_connection_type,
         }
     }
 
