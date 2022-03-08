@@ -16,7 +16,7 @@ use bytes::{Buf, BytesMut};
 
 use pulse::{context::Context, def::BufferAttr, sample::Spec, stream::Stream};
 
-use crate::{audio::pulseaudio::state::PAEvent, connection::data::{DataSender, DataSenderBuilder, MAX_PACKET_SIZE}};
+use crate::{audio::pulseaudio::state::PAEvent, connection::data::{DataSender, DataSenderBuilder, MAX_PACKET_SIZE}, config::RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES};
 
 use super::EventToAudioServerSender;
 
@@ -57,6 +57,8 @@ pub struct PAStreamManager {
     /// If true send `PAEvent::StreamManagerQuitReady` when recording stream
     /// closes.
     quit_requested: bool,
+    /// Encoder input buffer.
+    raw_pcm_buffer: Vec<u8>,
     encoder: Option<Encoder>,
     /// Encoder input buffer.
     encoder_buffer: Vec<i16>,
@@ -75,6 +77,7 @@ impl PAStreamManager {
             sender,
             enable_recording: true,
             quit_requested: false,
+            raw_pcm_buffer: Vec::new(),
             encoder: None,
             encoder_buffer: Vec::new(),
             encoder_output_buffer: Box::new([0; 4000]),
@@ -158,6 +161,7 @@ impl PAStreamManager {
         self.audio_packet_drop_count = 0;
         self.audio_packet_counter = Wrapping(0);
         self.audio_packet_buffer.clear();
+        self.raw_pcm_buffer.clear();
     }
 
     /// Handle `PARecordingStreamEvent::StateChange`.
@@ -217,6 +221,39 @@ impl PAStreamManager {
                 } else {
                     return Err(StreamError::SocketError(e));
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Encode PCM data and send encoded audio forward.
+    fn handle_raw_pcm_data(
+        data: &[u8],
+        raw_audio_data_buffer: &mut Vec<u8>,
+        send_handle: &mut DataSender,
+        audio_packet_drop_count: &mut u64,
+        audio_packet_counter: &mut Wrapping<u32>,
+        audio_packet_buffer: &mut Vec<u8>,
+    ) -> Result<(), StreamError> {
+        if data.len() % 2 != 0 {
+            return Err(StreamError::NotEnoughBytesForOneSample);
+        }
+
+        for byte in data {
+            raw_audio_data_buffer.push(*byte);
+
+            if raw_audio_data_buffer.len() == RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES {
+
+                Self::handle_data(
+                    raw_audio_data_buffer,
+                    send_handle,
+                    audio_packet_drop_count,
+                    audio_packet_counter,
+                    audio_packet_buffer,
+                )?;
+
+                raw_audio_data_buffer.clear();
             }
         }
 
@@ -296,8 +333,9 @@ impl PAStreamManager {
                             &mut self.audio_packet_buffer,
                         )
                     } else {
-                        Self::handle_data(
+                        Self::handle_raw_pcm_data(
                             data,
+                            &mut self.raw_pcm_buffer,
                             send_handle,
                             &mut self.audio_packet_drop_count,
                             &mut self.audio_packet_counter,

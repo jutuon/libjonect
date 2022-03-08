@@ -26,6 +26,11 @@ pub const DATA_PORT_UDP_SEND: u16 = 8082;
 pub const DATA_PORT_UDP_RECEIVE: u16 = 8083;
 pub const JSON_PORT: u16 = 8080;
 
+// 240 is 120 16-bit samples per channel. That is minimum frame size for Opus at
+// 48 kHz. This value is just for sending raw PCM, but lets use the same size
+// for simplicity.
+pub const RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES: usize = 240 * 2;
+
 #[derive(Debug, Clone)]
 pub struct LogicConfig {
     pub pa_source_name: Option<String>,
