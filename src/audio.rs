@@ -10,6 +10,7 @@ mod pulseaudio;
 #[cfg(target_os = "android")]
 mod oboe;
 
+use log::debug;
 use log::{info, error};
 
 use std::io::ErrorKind;
@@ -137,6 +138,8 @@ impl AudioManager {
         let mut bytes_per_second: u64 = 0;
         let mut data_count_time: Option<Instant> = None;
 
+        let mut first_packet: bool = true;
+
         'main_loop: loop {
             tokio::select! {
                 result = &mut quit_receiver => return result.unwrap(),
@@ -145,6 +148,8 @@ impl AudioManager {
                         match connection.recv_packet(&mut buffer) {
                             Ok(0) => break 'main_loop,
                             Ok(size) => {
+                                let bytes = &buffer[..size];
+
                                 // Minimum size should be 4 as packet counter is u32.
                                 bytes_per_second += (size - 4) as u64;
 
@@ -162,6 +167,13 @@ impl AudioManager {
                                         data_count_time = Some(Instant::now());
                                     }
                                 }
+
+                                if first_packet {
+                                    first_packet = false;
+                                    debug!("Audio packet number bytes: {:?}", &bytes[0..4]);
+                                    debug!("Audio packet bytes: {:?}", &bytes[4..]);
+                                }
+
                             }
                             Err(e) => {
                                 match e.kind() {

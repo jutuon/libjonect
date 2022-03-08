@@ -67,7 +67,7 @@ impl AudioServer {
         init_ok_sender.send(sender.clone()).unwrap();
 
         // Init PulseAudio context.
-        let mut pa_state = PAState::new(&mut context, sender);
+        let mut pa_state = PAState::new(&mut context, sender, self.config.clone());
 
         // Init glib mainloop.
         let glib_main_loop = MainLoop::new(Some(&context), false);

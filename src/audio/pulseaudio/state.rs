@@ -22,7 +22,7 @@ use super::{
     AudioEvent, EventToAudioServerSender,
 };
 
-use crate::{audio::pulseaudio::AudioServerEvent, connection::data::DataSenderBuilder};
+use crate::{audio::pulseaudio::AudioServerEvent, connection::data::DataSenderBuilder, config::LogicConfig};
 
 /// PulseAudio code events.
 #[derive(Debug)]
@@ -50,11 +50,12 @@ pub struct PAState {
     stream_manager: PAStreamManager,
     /// Buffer for events received before PulseAudio Context is ready.
     wait_context_event_queue: VecDeque<AudioServerEvent>,
+    config: std::sync::Arc<LogicConfig>,
 }
 
 impl PAState {
     /// Connect to PulseAudio.
-    pub fn new(glib_context: &mut MainContext, sender: EventToAudioServerSender) -> Self {
+    pub fn new(glib_context: &mut MainContext, sender: EventToAudioServerSender, config: std::sync::Arc<LogicConfig>) -> Self {
         let main_loop = pulse_glib::Mainloop::new(Some(glib_context)).unwrap();
 
         let proplist = Proplist::new().unwrap();
@@ -68,7 +69,7 @@ impl PAState {
 
         context.connect(None, FlagSet::NOFLAGS, None).unwrap();
 
-        let stream_manager = PAStreamManager::new(sender.clone());
+        let stream_manager = PAStreamManager::new(sender.clone(), config.clone());
 
         Self {
             _main_loop: main_loop,
@@ -78,6 +79,7 @@ impl PAState {
             current_operation: None,
             stream_manager,
             wait_context_event_queue: VecDeque::new(),
+            config,
         }
     }
 

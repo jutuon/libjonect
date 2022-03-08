@@ -39,4 +39,5 @@ pub struct LogicConfig {
     pub enable_ping: bool,
     pub connect_address: Option<SocketAddr>,
     pub enable_udp_audio_data_sending: bool,
+    pub print_first_audio_packet_bytes: bool,
 }

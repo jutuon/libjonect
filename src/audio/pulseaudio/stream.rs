@@ -4,7 +4,7 @@
 
 //! PulseAudio audio stream code.
 
-use log::{error,info, warn};
+use log::{error,info, warn, debug};
 
 use std::{
     convert::TryInto,
@@ -16,7 +16,7 @@ use bytes::{Buf, BytesMut};
 
 use pulse::{context::Context, def::BufferAttr, sample::Spec, stream::Stream};
 
-use crate::{audio::pulseaudio::state::PAEvent, connection::data::{DataSender, DataSenderBuilder, MAX_PACKET_SIZE}, config::RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES};
+use crate::{audio::pulseaudio::state::PAEvent, connection::data::{DataSender, DataSenderBuilder, MAX_PACKET_SIZE}, config::{RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES, LogicConfig}};
 
 use super::EventToAudioServerSender;
 
@@ -67,11 +67,12 @@ pub struct PAStreamManager {
     audio_packet_drop_count: u64,
     audio_packet_counter: Wrapping<u32>,
     audio_packet_buffer: Vec<u8>,
+    config: std::sync::Arc<LogicConfig>,
 }
 
 impl PAStreamManager {
     /// Create new `PAStreamManager`.
-    pub fn new(sender: EventToAudioServerSender) -> Self {
+    pub fn new(sender: EventToAudioServerSender, config: std::sync::Arc<LogicConfig>) -> Self {
         Self {
             record: None,
             sender,
@@ -84,6 +85,7 @@ impl PAStreamManager {
             audio_packet_drop_count: 0,
             audio_packet_counter: Wrapping(0),
             audio_packet_buffer: Vec::new(),
+            config,
         }
     }
 
@@ -202,6 +204,7 @@ impl PAStreamManager {
         audio_packet_drop_count: &mut u64,
         audio_packet_counter: &mut Wrapping<u32>,
         audio_packet_buffer: &mut Vec<u8>,
+        print_first_packet: bool,
     ) -> Result<(), StreamError> {
         assert!(data.len() <= MAX_PACKET_SIZE);
 
@@ -209,6 +212,12 @@ impl PAStreamManager {
 
         let packet_number = audio_packet_counter.0;
         *audio_packet_counter += Wrapping(1);
+
+        let packet_number_bytes = packet_number.to_be_bytes();
+        if print_first_packet && packet_number == 0 {
+            debug!("Packet number bytes: {packet_number_bytes:?}");
+            debug!("Audio bytes: {data:?}");
+        }
 
         audio_packet_buffer.extend_from_slice(&packet_number.to_be_bytes());
         audio_packet_buffer.extend_from_slice(data);
@@ -235,6 +244,7 @@ impl PAStreamManager {
         audio_packet_drop_count: &mut u64,
         audio_packet_counter: &mut Wrapping<u32>,
         audio_packet_buffer: &mut Vec<u8>,
+        print_first_packet: bool,
     ) -> Result<(), StreamError> {
         if data.len() % 2 != 0 {
             return Err(StreamError::NotEnoughBytesForOneSample);
@@ -251,6 +261,7 @@ impl PAStreamManager {
                     audio_packet_drop_count,
                     audio_packet_counter,
                     audio_packet_buffer,
+                    print_first_packet,
                 )?;
 
                 raw_audio_data_buffer.clear();
@@ -270,6 +281,7 @@ impl PAStreamManager {
         audio_packet_drop_count: &mut u64,
         audio_packet_counter: &mut Wrapping<u32>,
         audio_packet_buffer: &mut Vec<u8>,
+        print_first_packet: bool,
     ) -> Result<(), StreamError> {
         if data.len() % 2 != 0 {
             return Err(StreamError::NotEnoughBytesForOneSample);
@@ -297,6 +309,7 @@ impl PAStreamManager {
                     audio_packet_drop_count,
                     audio_packet_counter,
                     audio_packet_buffer,
+                    print_first_packet,
                 )?;
             }
         }
@@ -331,6 +344,7 @@ impl PAStreamManager {
                             &mut self.audio_packet_drop_count,
                             &mut self.audio_packet_counter,
                             &mut self.audio_packet_buffer,
+                            self.config.print_first_audio_packet_bytes,
                         )
                     } else {
                         Self::handle_raw_pcm_data(
@@ -340,6 +354,7 @@ impl PAStreamManager {
                             &mut self.audio_packet_drop_count,
                             &mut self.audio_packet_counter,
                             &mut self.audio_packet_buffer,
+                            self.config.print_first_audio_packet_bytes,
                         )
                     };
 
