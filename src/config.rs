@@ -15,6 +15,9 @@ pub const DEVICE_SOCKET_ADDRESS: &str = "0.0.0.0:8080";
 /// Socket address for data connections.
 pub const AUDIO_DATA_SOCKET_ADDRESS: &str = "0.0.0.0:8082";
 
+pub const DATA_PORT_UDP_SEND_ADDRESS: &str = "0.0.0.0:8082";
+pub const DATA_PORT_UDP_RECEIVE_ADDRESS: &str = "0.0.0.0:8083";
+
 /// Socket address UI connection.
 pub const UI_SOCKET_ADDRESS: &str = "127.0.0.1:8081";
 
