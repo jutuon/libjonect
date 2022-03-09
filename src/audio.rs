@@ -198,7 +198,7 @@ impl AudioManager {
     /// Run `AudioManager` logic.
     #[cfg(target_os = "android")]
     async fn run(mut self) {
-        let mut oboe_thread = self::oboe::OboeThread::new();
+        let mut oboe_thread = self::oboe::OboeThread::new(self.config.clone());
 
         let mut timer = tokio::time::interval(Duration::from_secs(1));
 

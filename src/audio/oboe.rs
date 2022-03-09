@@ -6,18 +6,18 @@ mod cpp_bridge;
 pub mod callback_mode;
 pub mod normal_mode;
 
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 
 
-use std::{thread::JoinHandle, sync::{atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver, SyncSender, self, TrySendError}}, io::Read, time::Duration};
-
-use crate::connection::tcp::TcpSendHandle;
+use std::{thread::JoinHandle, sync::{atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver, SyncSender, self, TrySendError}, Arc}, io::{Read, ErrorKind}, time::Duration, num::Wrapping, collections::VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct OboeInfo {
     pub sample_rate: i32,
     pub frames_per_burst: i32,
 }
+
+use crate::{connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::LogicConfig};
 
 use self::normal_mode::OboeCppNormalMode;
 
@@ -57,13 +57,13 @@ pub struct OboeThread {
 }
 
 impl OboeThread {
-    pub fn new() -> Self {
+    pub fn new(config: Arc<LogicConfig>) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
 
         let s = sender.clone();
         let handle = std::thread::spawn(move || {
             config_thread_priority("OboeThread");
-            OboeLogic::new(s, receiver).run();
+            OboeLogic::new(s, receiver, config).run();
         });
 
         Self {
@@ -92,7 +92,7 @@ pub struct NormalModeState {
     oboe_info: OboeInfo,
     pub normal_oboe: OboeCppNormalMode,
     decode_opus: bool,
-    data_stream: TcpSendHandle,
+    data_stream: DataReceiver,
     buffering_counter: Option<usize>,
     initial_buffer_block_count: usize,
     initial_buffer_frame_count: usize,
@@ -103,7 +103,7 @@ impl NormalModeState {
         oboe_info: OboeInfo,
         normal_oboe: OboeCppNormalMode,
         decode_opus: bool,
-        data_stream: TcpSendHandle,
+        data_stream: DataReceiver,
     ) -> Self {
         let initial_buffer_block_count: usize = (OBOE_BUFFER_BURST_COUNT*oboe_info.frames_per_burst/(AUDIO_BLOCK_FRAME_COUNT as i32)) as usize;
         let initial_buffer_frame_count: usize = initial_buffer_block_count*(AUDIO_BLOCK_FRAME_COUNT);
@@ -123,6 +123,9 @@ impl NormalModeState {
 
     fn handle_data_reading_and_writing(&mut self) -> Result<(), ()> {
 
+        unimplemented!();
+
+        /*
         if self.buffering_counter.is_some() {
             let mut buffer = vec![0u8; AUDIO_CHANNEL_COUNT * SAMPLE_BYTE_COUNT * self.oboe_info.frames_per_burst as usize];
             let mut buffer_i16 = vec![0i16; AUDIO_CHANNEL_COUNT * self.oboe_info.frames_per_burst as usize];
@@ -177,7 +180,7 @@ impl NormalModeState {
 
             Ok(())
         }
-
+     */
     }
 
 }
@@ -239,19 +242,22 @@ impl OboeMode {
     }
 }
 
+struct StopAudio;
 
 struct OboeLogic {
     sender: Sender<OboeEvent>,
     receiver: Receiver<OboeEvent>,
     oboe_mode: Option<OboeMode>,
+    config: Arc<LogicConfig>,
 }
 
 impl OboeLogic {
-    fn new(sender: Sender<OboeEvent>, receiver: Receiver<OboeEvent>) -> Self {
+    fn new(sender: Sender<OboeEvent>, receiver: Receiver<OboeEvent>, config: Arc<LogicConfig>) -> Self {
         Self {
             sender,
             receiver,
             oboe_mode: None,
+            config,
         }
     }
 
@@ -280,7 +286,9 @@ impl OboeLogic {
                     break;
                 }
                 OboeEvent::AudioEvent(audio_event) => {
-                    self.handle_audio_event(audio_event)
+                    if let Some(StopAudio) = self.handle_audio_event(audio_event) {
+                        self.quit_data_reader_and_oboe();
+                    }
                 }
                 OboeEvent::CallbackEvent(event) => {
                     match event {
@@ -319,7 +327,7 @@ impl OboeLogic {
         }
     }
 
-    fn handle_audio_event(&mut self, audio_event: AudioEvent) {
+    fn handle_audio_event(&mut self, audio_event: AudioEvent) -> Option<StopAudio> {
         match audio_event {
             AudioEvent::PlayAudio {
                 mut send_handle,
@@ -334,13 +342,15 @@ impl OboeLogic {
 
                 if self.oboe_mode.is_some() {
                     error!("Can not play multiple audio streams simultaneously.");
-                    return;
+                    return None;
                 }
 
-                if let Err(e) = send_handle.set_blocking() {
+                if let Err(e) = send_handle.set_timeout(Some(Duration::from_millis(10))) {
                     error!("Error: {e}");
-                    return;
+                    return None;
                 }
+
+                let send_handle = send_handle.build();
 
                 let oboe_info = OboeInfo {
                     sample_rate: if decode_opus { 48000 } else { sample_rate },
@@ -359,6 +369,7 @@ impl OboeLogic {
                         pcm_data_sender,
                         decode_opus,
                         frames_per_burst,
+                        self.config.clone(),
                     );
 
                     let callback_oboe = OboeCppCallbackMode::new(pcm_data_receiver, oboe_info.clone());
@@ -376,11 +387,15 @@ impl OboeLogic {
                         state: NormalModeState::new(oboe_info, normal_oboe, decode_opus, send_handle),
                     });
                 }
-            }
 
+                None
+            }
+            AudioEvent::StopPlayingAudio => {
+                Some(StopAudio)
+            }
             AudioEvent::StartRecording { .. } |
             AudioEvent::StopRecording |
-            AudioEvent::Message(_)  => (),
+            AudioEvent::Message(_)  => None,
         }
     }
 }
@@ -391,28 +406,35 @@ static DATA_READER_THREAD_IS_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub struct DataReaderThread {
     handle: JoinHandle<()>,
+    config: Arc<LogicConfig>,
 }
 
 impl DataReaderThread {
     fn new(
             sender: Sender<OboeEvent>,
-            data: TcpSendHandle,
+            data: DataReceiver,
             pcm_data_queue: SyncSender<AudioDataBlock>,
             decode_opus: bool,
             frames_per_burst: i32,
+            config: Arc<LogicConfig>,
         ) -> Self {
         if DATA_READER_THREAD_IS_RUNNING.swap(true, Ordering::SeqCst) {
             panic!("Only one data reader thread can be running at the same time.");
         }
 
+        let print_audio_packet = config.print_first_audio_packet_bytes;
         let handle = std::thread::spawn(move || {
             config_thread_priority("DataReaderThread");
             DATA_READER_THREAD_QUIT.store(false, Ordering::Relaxed);
-            Self::data_reading_logic(sender, data, pcm_data_queue, decode_opus, frames_per_burst);
+
+            let mut packet_loss_counter: u64 = 0;
+            Self::data_reading_logic(sender, data, pcm_data_queue, decode_opus, frames_per_burst, &mut packet_loss_counter, print_audio_packet);
+            info!("Packet loss counter: {packet_loss_counter}");
         });
 
         Self {
             handle,
+            config,
         }
     }
 
@@ -424,14 +446,20 @@ impl DataReaderThread {
 
     fn data_reading_logic(
         sender: Sender<OboeEvent>,
-        mut data_handle: TcpSendHandle,
+        mut data_handle: DataReceiver,
         pcm_data_queue: SyncSender<AudioDataBlock>,
         decode_opus: bool,
         frames_per_burst: i32,
+        packet_loss_counter: &mut u64,
+        print_first_audio_packet: bool,
     ) {
         // TODO: Opus decoding.
 
-        let mut buffer = [0u8; AUDIO_BLOCK_SIZE_IN_BYTES];
+        let mut packet_buffer = vec![0u8; MAX_PACKET_SIZE];
+        let mut audio_packet_manager = AudioPacketManager::new();
+
+        let mut audio_data_buffer: VecDeque<i16> = VecDeque::with_capacity(AUDIO_BLOCK_SIZE_IN_BYTES*8);
+
         let mut buffer_i16 = [0i16; AUDIO_BLOCK_SAMPLE_COUNT];
 
         let mut try_send_counter: u32 = 0;
@@ -445,60 +473,144 @@ impl DataReaderThread {
         let mut buffering_counter: Option<i32> = Some(0);
 
         loop {
-            // TODO: Timeout for reading?
-            match data_handle.read_exact(&mut buffer) {
-                Ok(_) => (),
-                Err(e) => {
-                    error!("Data socket reading error: {}", e);
+            let packet_data: &[u8] = match data_handle.recv_packet(&mut packet_buffer) {
+                Ok(0) => {
                     sender.send(OboeEvent::CallbackEvent(CallbackModeEvent::DataReaderReadingError)).unwrap();
-                    return
+                    error!("Data receiving error: disconnected");
+                    Self::wait_quit();
+                    return;
                 }
-            }
+                Ok(size) => &packet_buffer[..size],
+                Err(e) => {
+                    match e.kind() {
+                        ErrorKind::WouldBlock => {
+                            if DATA_READER_THREAD_QUIT.load(Ordering::Relaxed) {
+                                return;
+                            }
 
-            for (sample_bytes, sample) in buffer.chunks_exact(2).zip(buffer_i16.iter_mut()) {
-                *sample = i16::from_le_bytes(sample_bytes.try_into().unwrap());
-            }
-
-            loop {
-                match pcm_data_queue.try_send(buffer_i16) {
-                    Ok(()) => {
-                        try_send_counter = 0;
-                        break;
-                    },
-                    Err(TrySendError::Disconnected(_)) => {
-                        panic!("TrySendError::Disconnected should not be possible.");
-                    }
-                    Err(TrySendError::Full(_)) => {
-                        if try_send_warning {
-                            warn!("TrySendError::Full");
-                            try_send_warning = false;
+                            continue;
                         }
-
-                        std::thread::sleep(Duration::from_millis(1));
-                        try_send_counter += 1;
-
-                        if try_send_counter == 500 {
-                            // Oboe audio stream is probably broken.
-                            sender.send(OboeEvent::CallbackEvent(CallbackModeEvent::DataReaderSendingError)).unwrap();
+                        _ => {
+                            sender.send(OboeEvent::CallbackEvent(CallbackModeEvent::DataReaderReadingError)).unwrap();
+                            error!("Data receiving error: {e}");
+                            Self::wait_quit();
+                            return;
                         }
                     }
                 }
             };
 
-            if let Some(counter) = buffering_counter.as_mut() {
-                *counter += 1;
+            let (packet_counter_bytes, audio_data) = packet_data.split_at(4);
+            let packet_counter = u32::from_be_bytes(packet_counter_bytes.try_into().unwrap());
 
-                if *counter == initial_buffer_block_count {
-                    sender.send(OboeEvent::CallbackEvent(CallbackModeEvent::BufferingDone)).unwrap();
+            if print_first_audio_packet && packet_counter == 0 {
+                debug!("Packet number bytes: {packet_counter_bytes:?}");
+                debug!("Audio bytes: {audio_data:?}");
+            }
 
-                    buffering_counter = None;
+            match audio_packet_manager.check_packet(packet_counter) {
+                PacketStatus::Normal => (),
+                PacketStatus::Discard => continue,
+                PacketStatus::PacketLoss(packet_loss) => {
+                    *packet_loss_counter += packet_loss as u64;
+                    info!("Packet loss counter: {packet_loss_counter}");
+                    // TODO: Handle packet loss.
                 }
             }
+
+            assert!(audio_data.len() % 2 == 0);
+
+            audio_data_buffer.extend(audio_data.chunks_exact(2).map(|sample_bytes| {
+                i16::from_le_bytes(sample_bytes.try_into().unwrap())
+            }));
+
+            while audio_data_buffer.len() >= AUDIO_BLOCK_SAMPLE_COUNT {
+                for target in buffer_i16.iter_mut() {
+                    *target = audio_data_buffer.pop_front().unwrap();
+                }
+
+                loop {
+                    match pcm_data_queue.try_send(buffer_i16) {
+                        Ok(()) => {
+                            try_send_counter = 0;
+                            break;
+                        },
+                        Err(TrySendError::Disconnected(_)) => {
+                            panic!("TrySendError::Disconnected should not be possible.");
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            if try_send_warning {
+                                warn!("TrySendError::Full");
+                                try_send_warning = false;
+                            }
+
+                            std::thread::sleep(Duration::from_millis(1));
+                            try_send_counter += 1;
+
+                            if try_send_counter == 500 {
+                                // Oboe audio stream is probably broken. Quit
+                                // data reading using event.
+                                sender.send(OboeEvent::CallbackEvent(CallbackModeEvent::DataReaderSendingError)).unwrap();
+
+                                // Read packets and wait quit.
+                                Self::read_packets_and_wait_quit(data_handle);
+                                return
+                            }
+                        }
+                    }
+                }
+
+                if let Some(counter) = buffering_counter.as_mut() {
+                    *counter += 1;
+
+                    if *counter == initial_buffer_block_count {
+                        sender.send(OboeEvent::CallbackEvent(CallbackModeEvent::BufferingDone)).unwrap();
+
+                        buffering_counter = None;
+                    }
+                }
+
+                if DATA_READER_THREAD_QUIT.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+        }
+    }
+
+    fn wait_quit() {
+        loop {
+            std::thread::sleep(Duration::from_millis(1));
+            if DATA_READER_THREAD_QUIT.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+    }
+
+    fn read_packets_and_wait_quit(
+        mut data_handle: DataReceiver,
+    ) {
+        loop {
+            std::thread::sleep(Duration::from_millis(1));
+
+            let mut buffer = [0];
+            match data_handle.recv_packet(&mut buffer) {
+                Ok(0) => {
+                    error!("Data receiving error: disconnected");
+                    break;
+                }
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Data receiving error: {e}");
+                    break;
+                }
+            };
 
             if DATA_READER_THREAD_QUIT.load(Ordering::Relaxed) {
                 return;
             }
         }
+
+        Self::wait_quit();
     }
 }
 
@@ -525,5 +637,121 @@ fn config_thread_priority(name: &str) {
         error!("libc::getpriority returned -1 which might be error or not.");
     } else {
         info!("Thread priority for thread '{}' is now {}.", name, get_result);
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum PacketStatus {
+    Normal,
+    PacketLoss(u32),
+    Discard,
+}
+
+struct AudioPacketManager {
+    expected_next_packet_count: u32,
+    expected_next_counter_wrap_byte: bool,
+}
+
+impl AudioPacketManager {
+    const WRAP_BYTE_MASK: u32 = 0b1000_0000_0000_0000;
+    const MAX_COUNT: u32 = !Self::WRAP_BYTE_MASK;
+
+    fn new() -> Self {
+        Self {
+            expected_next_packet_count: 0,
+            expected_next_counter_wrap_byte: false,
+        }
+    }
+
+    fn start_from(count: u32) -> Self {
+        Self {
+            expected_next_packet_count: count,
+            expected_next_counter_wrap_byte: false,
+        }
+    }
+
+    fn check_packet(&mut self, count: u32) -> PacketStatus {
+        let wrap = count & Self::WRAP_BYTE_MASK != 0;
+        let count = count & !Self::WRAP_BYTE_MASK;
+
+        if self.expected_next_counter_wrap_byte == wrap {
+
+            match count.cmp(&self.expected_next_packet_count) {
+                std::cmp::Ordering::Equal => {
+                    let next = count + 1;
+
+                    let (expected_next_packet_count, expected_next_counter_wrap_byte) = if next == Self::WRAP_BYTE_MASK {
+                        (0, !self.expected_next_counter_wrap_byte)
+                    } else {
+                        (next, self.expected_next_counter_wrap_byte)
+                    };
+
+                    self.expected_next_packet_count = expected_next_packet_count;
+                    self.expected_next_counter_wrap_byte = expected_next_counter_wrap_byte;
+
+                    PacketStatus::Normal
+                }
+                std::cmp::Ordering::Less => {
+                    PacketStatus::Discard
+                }
+                std::cmp::Ordering::Greater => {
+                    let packet_loss = count - self.expected_next_packet_count;
+                    let next = count + 1;
+
+                    let (expected_next_packet_count, expected_next_counter_wrap_byte) = if next == Self::WRAP_BYTE_MASK {
+                        (0, !self.expected_next_counter_wrap_byte)
+                    } else {
+                        (next, self.expected_next_counter_wrap_byte)
+                    };
+
+                    self.expected_next_packet_count = expected_next_packet_count;
+                    self.expected_next_counter_wrap_byte = expected_next_counter_wrap_byte;
+
+                    PacketStatus::PacketLoss(packet_loss)
+                }
+            }
+        } else {
+            match count.cmp(&self.expected_next_packet_count) {
+                std::cmp::Ordering::Less => {
+                    let packet_loss = Self::MAX_COUNT - self.expected_next_packet_count + count;
+
+                    self.expected_next_packet_count = count + 1;
+                    self.expected_next_counter_wrap_byte = wrap;
+
+                    PacketStatus::PacketLoss(packet_loss)
+                }
+                std::cmp::Ordering::Equal | std::cmp::Ordering::Greater => {
+                    // Just assume that this is old packet.
+                    PacketStatus::Discard
+                }
+            }
+        }
+    }
+}
+
+// TODO: Add more tests and check that current tests pass.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_no_packet_loss_1() {
+        assert_eq!(AudioPacketManager::new().check_packet(0), PacketStatus::Normal);
+    }
+
+    #[test]
+    fn test_packet_loss_1() {
+        assert_eq!(AudioPacketManager::new().check_packet(1), PacketStatus::PacketLoss(1));
+    }
+
+    #[test]
+    fn test_packet_loss_2() {
+        assert_eq!(AudioPacketManager::new().check_packet(2), PacketStatus::PacketLoss(2));
+    }
+
+    #[test]
+    fn test_discard_1() {
+        assert_eq!(AudioPacketManager::new().check_packet(1), PacketStatus::PacketLoss(1));
     }
 }
