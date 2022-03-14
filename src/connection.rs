@@ -4,6 +4,7 @@
 
 pub mod tcp;
 pub mod data;
+pub mod usb;
 
 use log::{warn, error};
 
@@ -27,7 +28,7 @@ use crate::{
     utils::{ConnectionId, QuitReceiver, QuitSender}, connection::tcp::ConnectionListener, device::DeviceManagerEvent, audio::{AudioEvent, PlayAudioEventAndroid},
 };
 
-use self::{tcp::{ListenerError, ConnectionListenerHandle}, data::{tcp::TcpDataConnectionBuilder, udp::UdpManager}};
+use self::{tcp::{ListenerError, ConnectionListenerHandle}, data::{tcp::TcpDataConnectionBuilder, udp::UdpManager, usb::UsbDataConnectionBuilder}, usb::{UsbManager, UsbManagerHandle, UsbEvent}};
 
 use super::{
     message_router::{MessageReceiver, RouterSender},
@@ -71,8 +72,13 @@ pub struct CmInternalEventWrapper(CmInternalEvent);
 #[derive(Debug)]
 enum CmInternalEvent {
     ListenerError(ListenerError),
-    NewJsonStream(TcpStream, SocketAddr),
+    NewJsonStream {
+        stream: TcpStream,
+        address: SocketAddr,
+        usb: bool,
+    },
     NewDataStream(TcpStream, SocketAddr),
+    UsbTcpListenerError(ListenerError),
 }
 
 type AudioQuitEvent = AudioEvent;
@@ -168,15 +174,17 @@ pub struct ConnectionResources {
     ip: IpAddr,
     pending_data_connection_tcp: Option<std::net::TcpStream>,
     next_resource_request: Option<(NextResourceRequest, DataConnectionType)>,
+    usb: bool,
 }
 
 impl ConnectionResources {
-    fn new(id: ConnectionId, ip: IpAddr) -> Self {
+    fn new(id: ConnectionId, ip: IpAddr, usb: bool) -> Self {
         Self {
             id,
             ip,
             pending_data_connection_tcp: None,
             next_resource_request: None,
+            usb,
         }
     }
 
@@ -184,21 +192,71 @@ impl ConnectionResources {
         self.ip
     }
 
+    fn usb(&self) -> bool {
+        self.usb
+    }
+
     fn set_pending_tcp_connection(&mut self, tcp_stream: std::net::TcpStream) {
         self.pending_data_connection_tcp = Some(tcp_stream);
     }
 
-    fn check_next_resource_request(&mut self, resource_manager: &mut ResourceManager) -> Option<AudioEvent> {
+    fn check_next_resource_request(&mut self, resource_manager: &mut ResourceManager) -> (Option<AudioEvent>, Option<UsbEvent>) {
         match (self.next_resource_request, self.pending_data_connection_tcp.take()) {
-            (Some((NextResourceRequest::SendAudio { sample_rate }, DataConnectionType::Tcp)), Some(stream)) => {
+            (Some((NextResourceRequest::SendAudio { sample_rate }, _)), tcp_stream) if self.usb => {
+                self.pending_data_connection_tcp = tcp_stream;
+                let (send_handle, receiver) = UsbDataConnectionBuilder::build_sender();
+
                 if resource_manager.connect_send_audio(self.id).is_ok() {
-                    Some(AudioEvent::StartRecording {
-                        send_handle: TcpDataConnectionBuilder::build_mode_send(stream),
-                        sample_rate,
-                    })
+                    (
+                        Some(AudioEvent::StartRecording {
+                            send_handle,
+                            sample_rate,
+                        }),
+                        Some(UsbEvent::SendAudioOverUsb(receiver)),
+                    )
                 } else {
                     warn!("SendAudio resource is not available.");
-                    None
+                    (None, None)
+                }
+            }
+            (
+                Some((
+                NextResourceRequest::PlayAudio {
+                    sample_rate,
+                    android_info,
+                    decode_opus
+                },
+                _
+                )), tcp_stream
+            ) if self.usb => {
+                self.pending_data_connection_tcp = tcp_stream;
+                let (sender, receiver) = UsbDataConnectionBuilder::build_receiver();
+
+                if resource_manager.connect_play_audio(self.id).is_ok() {
+                    (
+                        Some(AudioEvent::PlayAudio {
+                            send_handle: receiver,
+                            sample_rate,
+                            android_info,
+                            decode_opus,
+                        }),
+                        Some(UsbEvent::ReceiveAudioOverUsb(sender))
+                    )
+                } else {
+                    warn!("PlayAudio resource is not available.");
+                    (None, None)
+                }
+            }
+
+            (Some((NextResourceRequest::SendAudio { sample_rate }, DataConnectionType::Tcp)), Some(stream)) => {
+                if resource_manager.connect_send_audio(self.id).is_ok() {
+                    (Some(AudioEvent::StartRecording {
+                        send_handle: TcpDataConnectionBuilder::build_mode_send(stream),
+                        sample_rate,
+                    }), None)
+                } else {
+                    warn!("SendAudio resource is not available.");
+                    (None, None)
                 }
             }
             (
@@ -212,23 +270,23 @@ impl ConnectionResources {
                 )), Some(stream)
             ) => {
                 if resource_manager.connect_play_audio(self.id).is_ok() {
-                    Some(AudioEvent::PlayAudio {
+                    (Some(AudioEvent::PlayAudio {
                         send_handle: TcpDataConnectionBuilder::build_mode_receive(stream),
                         sample_rate,
                         android_info,
                         decode_opus,
-                    })
+                    }), None)
                 } else {
                     warn!("PlayAudio resource is not available.");
-                    None
+                    (None, None)
                 }
             }
             (Some((_, DataConnectionType::Tcp)), None) => {
-                None
+                (None, None)
             }
             (_, Some(stream)) => {
                 self.pending_data_connection_tcp = Some(stream);
-                None
+                (None, None)
             },
             (Some((NextResourceRequest::SendAudio { sample_rate }, DataConnectionType::Udp)), pending_data_connection_tcp) => {
                 self.pending_data_connection_tcp = pending_data_connection_tcp;
@@ -237,23 +295,23 @@ impl ConnectionResources {
                     if let Some(udp_manager) = resource_manager.udp_manager_mut() {
                         match udp_manager.build_mode_send(self.ip) {
                             Ok(send_handle) => {
-                                Some(AudioEvent::StartRecording {
+                                (Some(AudioEvent::StartRecording {
                                     send_handle,
                                     sample_rate,
-                                })
+                                }), None)
                             },
                             Err(e) => {
                                 error!("UDP error: {:?}", e);
-                                None
+                                (None, None)
                             }
                         }
                     } else {
                         warn!("UDP support is disabled");
-                        None
+                        (None, None)
                     }
                 } else {
                     warn!("SendAudio resource is not available.");
-                    None
+                    (None, None)
                 }
             }
             (
@@ -272,28 +330,28 @@ impl ConnectionResources {
                     if let Some(udp_manager) = resource_manager.udp_manager_mut() {
                         match udp_manager.build_mode_receive(self.ip) {
                             Ok(send_handle) => {
-                                Some(AudioEvent::PlayAudio {
+                                (Some(AudioEvent::PlayAudio {
                                     send_handle,
                                     sample_rate,
                                     android_info,
                                     decode_opus,
-                                })
+                                }), None)
                             },
                             Err(e) => {
                                 error!("UDP error: {:?}", e);
-                                None
+                                (None, None)
                             }
                         }
                     } else {
                         warn!("UDP support is disabled");
-                        None
+                        (None, None)
                     }
                 } else {
                     warn!("PlayAudio resource is not available.");
-                    None
+                    (None, None)
                 }
             }
-            (None, None) => None,
+            (None, None) => (None, None),
         }
 
 
@@ -349,6 +407,9 @@ impl ConnectionManager {
     pub async fn run(mut self, mut quit_receiver: QuitReceiver) {
 
         let mut listener: Option<ConnectionListenerHandle> = None;
+        let mut usb_manager: Option<UsbManagerHandle> = None;
+
+        usb_manager = Some(UsbManager::start_task(self.r_sender.clone(), self.config.clone()));
 
         loop {
             tokio::select! {
@@ -368,7 +429,7 @@ impl ConnectionManager {
                         event => {
                             tokio::select! {
                                 result = &mut quit_receiver => break result.unwrap(),
-                                _ = self.handle_cm_event(event) => (),
+                                _ = self.handle_cm_event(event, usb_manager.as_mut()) => (),
                             };
                         }
                     }
@@ -382,18 +443,25 @@ impl ConnectionManager {
             handle.quit().await
         }
 
+        if let Some(usb_handle) = usb_manager.take() {
+            usb_handle.quit().await
+        }
+
         // Other components just drop connection related objects so there is no
         // need to close anything.
     }
 
-    async fn handle_cm_event(&mut self, event: ConnectionManagerEvent) {
+    async fn handle_cm_event(&mut self, event: ConnectionManagerEvent, usb_handle: Option<&mut UsbManagerHandle>) {
         match event {
             ConnectionManagerEvent::Internal(CmInternalEventWrapper(event)) => match event {
                 CmInternalEvent::ListenerError(error) => {
                     let e = UiEvent::TcpSupportDisabledBecauseOfError(error);
                     self.r_sender.send_ui_event(e).await;
                 }
-                CmInternalEvent::NewJsonStream(stream, address) => {
+                CmInternalEvent::UsbTcpListenerError(error) => {
+                    error!("USB support disabled: {:?}", error);
+                }
+                CmInternalEvent::NewJsonStream { stream, address, usb } => {
                     let id = self.next_json_connection_id;
                     self.next_json_connection_id = match id.checked_add(1) {
                         Some(new_next_id) => new_next_id,
@@ -403,7 +471,7 @@ impl ConnectionManager {
                         }
                     };
 
-                    self.json_connections.insert(id, ConnectionResources::new(id, address.ip()));
+                    self.json_connections.insert(id, ConnectionResources::new(id, address.ip(), usb));
 
                     let e = DeviceManagerEvent::NewDeviceConnection(JsonConnection::new(stream, address, id));
                     self.r_sender.send_device_manager_event(e).await;
@@ -411,7 +479,7 @@ impl ConnectionManager {
                 CmInternalEvent::NewDataStream(stream, address) => {
                     let mut connection = None;
                     for (id, connection_resources) in self.json_connections.iter_mut() {
-                        if connection_resources.ip() == address.ip() {
+                        if connection_resources.ip() == address.ip() && !connection_resources.usb() {
                             connection = Some((id, connection_resources));
                         }
                     }
@@ -425,8 +493,14 @@ impl ConnectionManager {
                     match stream.into_std() {
                         Ok(stream) => {
                             connection_resources.set_pending_tcp_connection(stream);
-                            if let Some(event) = connection_resources.check_next_resource_request(&mut self.resource_manager) {
-                                self.r_sender.send_audio_server_event(event).await;
+                            let (audio_event, usb_event) = connection_resources.check_next_resource_request(&mut self.resource_manager);
+
+                            if let (Some(usb_event), Some(usb_handle)) = (usb_event, usb_handle) {
+                                usb_handle.send_event(usb_event).await;
+                            }
+
+                            if let Some(audio_event) = audio_event {
+                                self.r_sender.send_audio_server_event(audio_event).await;
                             }
                         }
                         Err(e) => {
@@ -445,7 +519,7 @@ impl ConnectionManager {
                 };
 
                 self.r_sender.send_connection_manager_event(
-                    CmInternalEvent::NewJsonStream(stream, address).into()
+                    CmInternalEvent::NewJsonStream { stream, address, usb: false }.into()
                 ).await;
             }
             ConnectionManagerEvent::ConnectToData { id, next_resource_request, data_connection_type } => {
@@ -479,8 +553,14 @@ impl ConnectionManager {
                     DataConnectionType::Udp => {
                         if let Some(connection_resources) = self.json_connections.get_mut(&id) {
                             connection_resources.set_next_resource_request(next_resource_request, data_connection_type);
-                            if let Some(event) = connection_resources.check_next_resource_request(&mut self.resource_manager) {
-                                self.r_sender.send_audio_server_event(event).await;
+                            let (audio_event, usb_event) = connection_resources.check_next_resource_request(&mut self.resource_manager);
+
+                            if let (Some(usb_event), Some(usb_handle)) = (usb_event, usb_handle) {
+                                usb_handle.send_event(usb_event).await;
+                            }
+
+                            if let Some(audio_event) = audio_event {
+                                self.r_sender.send_audio_server_event(audio_event).await;
                             }
                         }
                     },
@@ -499,8 +579,14 @@ impl ConnectionManager {
             } => {
                 if let Some(connection_resources) = self.json_connections.get_mut(&id) {
                     connection_resources.set_next_resource_request(next_resource_request, data_connection_type);
-                    if let Some(event) = connection_resources.check_next_resource_request(&mut self.resource_manager) {
-                        self.r_sender.send_audio_server_event(event).await;
+                    let (audio_event, usb_event) = connection_resources.check_next_resource_request(&mut self.resource_manager);
+
+                    if let (Some(usb_event), Some(usb_handle)) = (usb_event, usb_handle) {
+                        usb_handle.send_event(usb_event).await;
+                    }
+
+                    if let Some(audio_event) = audio_event {
+                        self.r_sender.send_audio_server_event(audio_event).await;
                     }
                 }
             }

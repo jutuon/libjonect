@@ -21,6 +21,8 @@ pub const DATA_PORT_UDP_RECEIVE_ADDRESS: &str = "0.0.0.0:8083";
 /// Socket address UI connection.
 pub const UI_SOCKET_ADDRESS: &str = "127.0.0.1:8081";
 
+pub const USB_JSON_SOCKET_ADDRESS: &str = "127.0.0.1:8084";
+
 pub const DATA_PORT_TCP: u16 = 8082;
 pub const DATA_PORT_UDP_SEND: u16 = 8082;
 pub const DATA_PORT_UDP_RECEIVE: u16 = 8083;

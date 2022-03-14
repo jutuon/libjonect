@@ -25,5 +25,8 @@ package = "libpulse-glib-binding"
 version = "0.14.0"
 features = ["v3_20"]
 
+[target.'cfg(target_os = "linux")'.dependencies.rusb]
+version = "0.9.0"
+
 [target.'cfg(target_os = "android")'.dependencies.libc]
 version = "0.2.112"

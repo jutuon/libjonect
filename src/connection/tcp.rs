@@ -115,7 +115,7 @@ impl ConnectionListener {
                         match result {
                             Ok((stream, address)) => {
                                 self.r_sender.send_connection_manager_event(
-                                    CmInternalEvent::NewJsonStream(stream, address).into(),
+                                    CmInternalEvent::NewJsonStream { stream, address, usb: false }.into(),
                                 ).await;
                             }
                             Err(error) => {

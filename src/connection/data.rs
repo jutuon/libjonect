@@ -6,6 +6,7 @@
 
 pub mod tcp;
 pub mod udp;
+pub mod usb;
 
 use std::{net::TcpStream, time::Duration, io::{Write, Read}, fmt::Debug};
 
