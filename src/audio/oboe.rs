@@ -508,13 +508,17 @@ impl DataReaderThread {
                 debug!("Audio bytes: {audio_data:?}");
             }
 
-            match audio_packet_manager.check_packet(packet_counter) {
-                PacketStatus::Normal => (),
-                PacketStatus::Discard => continue,
-                PacketStatus::PacketLoss(packet_loss) => {
-                    *packet_loss_counter += packet_loss as u64;
-                    info!("Packet loss counter: {packet_loss_counter}");
-                    // TODO: Handle packet loss.
+            if !data_handle.is_reliable_connection() {
+                // TODO: Fix check_packet. There is some bug at least with USB
+                // accessory mode.
+                match audio_packet_manager.check_packet(packet_counter) {
+                    PacketStatus::Normal => (),
+                    PacketStatus::Discard => continue,
+                    PacketStatus::PacketLoss(packet_loss) => {
+                        *packet_loss_counter += packet_loss as u64;
+                        info!("Packet loss counter: {packet_loss_counter}");
+                        // TODO: Handle packet loss.
+                    }
                 }
             }
 
