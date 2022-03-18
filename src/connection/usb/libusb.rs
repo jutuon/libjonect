@@ -1,4 +1,4 @@
-use std::{thread::JoinHandle, sync::{mpsc::{Sender, Receiver, TryRecvError, RecvError}, Arc}, time::Duration, ffi::CString, net::TcpStream, io::{Read, ErrorKind, Write}};
+use std::{thread::JoinHandle, sync::{mpsc::{Sender, Receiver, TryRecvError, RecvError, RecvTimeoutError}, Arc}, time::Duration, ffi::CString, net::TcpStream, io::{Read, ErrorKind, Write}};
 
 use log::{info, error};
 use rusb::{Context, UsbContext, Device, Direction, RequestType, DeviceHandle};
@@ -17,7 +17,7 @@ const ACCESSORY_MODE_AND_ADB_PRODUCT_ID: u16 = 0x2d01;
 
 const ACCESSORY_MODE_VENDOR_ID: u16 = 0x18d1;
 
-const USB_TIMEOUT: Duration = Duration::from_millis(20000);
+const USB_TIMEOUT: Duration = Duration::from_millis(500);
 
 enum LibUsbEvent {
     RequestQuit,
@@ -93,7 +93,6 @@ impl LibUsbLogic {
         for device in context.devices().unwrap().iter() {
             Self::print_usb_info(&device);
         }
-        let mut flag = false;
         let mut current_accessory: Option<AccessoryConnection> = None;
 
         loop {
@@ -116,16 +115,11 @@ impl LibUsbLogic {
             };
 
             if let Some(event) = event {
-                match self.receiver.recv().unwrap() {
-                    LibUsbEvent::RequestQuit => {
-                        break;
-                    }
+                match event {
+                    LibUsbEvent::RequestQuit => break,
                     LibUsbEvent::PollUsbDevices => {
                         match current_accessory.take() {
                             None => {
-                                if flag {
-                                    continue;
-                                }
                                 match Self::find_accessory_mode_usb_device(&context) {
                                     Ok(None) => {
                                         info!("No USB accessory devices detected.");
@@ -133,7 +127,6 @@ impl LibUsbLogic {
                                     Ok(Some(accessory)) => {
                                         match AccessoryConnection::new(accessory) {
                                             Ok(connection) => {
-                                                flag = true;
                                                 current_accessory = Some(connection);
                                                 continue;
                                             }
@@ -310,16 +303,17 @@ impl AccessoryConnection {
 
         // TODO: Use main loop event receiver also for data.
         if let Some(receiver) = self.receive_audio.as_mut() {
-            match receiver.recv() {
+            match receiver.raw_recv_mut().recv_timeout(Duration::from_millis(100)) {
                 Ok(mut packet) => {
                     packet.set_packet_type(UsbPacketOutType::AudioData as u8);
                     self.accessory.send_usb_packet(packet).map_err(AccessoryConnectionError::Usb)?;
 
                 }
-                Err(RecvError) => {
+                Err(RecvTimeoutError::Disconnected) => {
                     self.receive_audio = None;
                     info!("USB audio receiver disconnected.");
                 }
+                Err(RecvTimeoutError::Timeout) => (),
             }
         }
 

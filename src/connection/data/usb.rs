@@ -96,6 +96,10 @@ impl UsbDataConnectionReceiver {
     pub fn recv(&mut self) -> Result<UsbPacket, RecvError> {
         self.receiver.recv()
     }
+
+    pub fn raw_recv_mut(&mut self) -> &mut Receiver<UsbPacket> {
+        &mut self.receiver
+    }
 }
 
 impl DataReceiverBuilderInterface for UsbDataConnectionReceiver {

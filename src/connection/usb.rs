@@ -90,8 +90,6 @@ impl UsbManager {
 
         use crate::{config, connection::{tcp::ListenerError, CmInternalEvent}};
 
-        let mut usb_thread = self::libusb::LibUsbThread::start(self.r_sender.clone(), self.config).await;
-
         let usb_json_listener = match TcpListener::bind(config::USB_JSON_SOCKET_ADDRESS).await {
             Ok(listener) => listener,
             Err(e) => {
@@ -109,6 +107,7 @@ impl UsbManager {
             }
         };
 
+        let mut usb_thread = self::libusb::LibUsbThread::start(self.r_sender.clone(), self.config).await;
 
         // TODO: Do not poll USB devices.
         let mut timer = tokio::time::interval(Duration::from_secs(2));
@@ -140,14 +139,16 @@ impl UsbManager {
                                 CmInternalEvent::ListenerError(e).into()
                             ).await;
 
-                            break;
+                            usb_thread.quit();
+                            self.quit_receiver.await.unwrap();
+                            return;
                         }
                     }
                 },
             }
         }
 
-        usb_thread.quit()
+        usb_thread.quit();
     }
 
     #[cfg(target_os = "android")]
