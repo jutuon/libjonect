@@ -26,7 +26,7 @@ use super::AudioEvent;
 
 use callback_mode::OboeCppCallbackMode;
 
-const OBOE_BUFFER_BURST_COUNT: i32 = 8;
+const OBOE_BUFFER_BURST_COUNT: i32 = 2;
 
 const SAMPLE_BYTE_COUNT: usize = 2;
 const AUDIO_CHANNEL_COUNT: usize = 2;

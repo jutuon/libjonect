@@ -29,6 +29,8 @@ pub trait DataSenderInterface: Debug + Send {
 
     /// Max packet lenght is 65 507 bytes (max packet length with IPv4 and UDP).
     ///
+    /// If underlying data transfer method is USB then the max packet lenght is USB_PACKET_MAX_DATA_SIZE.
+    ///
     /// Data sending might fail if underlying connection can detect disconnects.
     ///
     /// This might return io::ErrorKind::WouldBlock if underlying buffer is full.
@@ -39,6 +41,8 @@ pub trait DataReceiverInterface: Debug + Send {
     fn is_reliable_connection(&self) -> bool;
 
     /// Max packet lenght is 65 507 bytes (max packet length with IPv4 and UDP).
+    ///
+    /// If underlying data transfer method is USB then the max packet lenght is USB_PACKET_MAX_DATA_SIZE.
     ///
     /// Data receiving might fail if underlying connection can detect disconnects.
     ///

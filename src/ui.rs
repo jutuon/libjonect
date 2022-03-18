@@ -37,6 +37,7 @@ pub enum UiProtocolFromServerToUi {
     AndroidGetNativeSampleRate {
         message_from: String,
     },
+    AndroidGetUsbAccessoryFileDescriptor,
 }
 
 /// UI message from UI to server.
@@ -48,7 +49,9 @@ pub enum UiProtocolFromUiToServer {
     DisconnectDevice,
     ConnectTo { ip_address: String },
     AndroidNativeSampleRate(AndroidAudioInfo),
-
+    AndroidUsbAccessoryFileDescriptor {
+        fd: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -66,6 +69,7 @@ pub enum UiEvent {
     AllDevicesAreNowDisconnected,
     ConnectionError { connection_id: ConnectionId },
     ConnectionEstablished { connection_id: ConnectionId },
+    AndroidGetUsbAccessoryFileDescriptor,
 }
 
 /// Quit reason for `UiConnectionManager::handle_connection`.
@@ -179,6 +183,9 @@ impl UiConnectionManager {
                         UiEvent::ConnectionEstablished { .. } => {
                             connection_handle.send_down(UiProtocolFromServerToUi::DeviceConnectionEstablished).await;
                         }
+                        UiEvent::AndroidGetUsbAccessoryFileDescriptor => {
+                            connection_handle.send_down(UiProtocolFromServerToUi::AndroidGetUsbAccessoryFileDescriptor).await;
+                        }
                     }
                 }
                 event = connections_receiver.recv() => {
@@ -256,6 +263,17 @@ impl UiConnectionManager {
             }
             UiProtocolFromUiToServer::DisconnectDevice => {
                 self.r_sender.send_device_manager_event(DeviceManagerEvent::DisconnectAllDevices).await;
+            }
+            UiProtocolFromUiToServer::AndroidUsbAccessoryFileDescriptor { fd } => {
+                let fd_number: i32 = match fd.parse() {
+                    Ok(number) => number,
+                    Err(e) => {
+                        error!("AndroidUsbAccessoryFileDescriptor parsing error: {e}");
+                        return;
+                    }
+                };
+
+                self.r_sender.send_connection_manager_event(ConnectionManagerEvent::AndroidUsbAccessoryFileDescriptor(fd_number)).await;
             }
         }
     }

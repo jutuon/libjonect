@@ -6,7 +6,7 @@ pub mod tcp;
 pub mod data;
 pub mod usb;
 
-use log::{warn, error};
+use log::{warn, error, info};
 
 use serde::{Serialize, Deserialize};
 use tokio::{
@@ -18,9 +18,9 @@ use tokio::{
 use std::{
     collections::HashMap,
     fmt::Debug,
-    io::{self},
+    io::{self, Read},
     sync::Arc,
-    net::{SocketAddr, IpAddr},
+    net::{SocketAddr, IpAddr}, os::unix::prelude::{RawFd, FromRawFd}, fs::File, time::Duration,
 };
 
 use crate::{
@@ -56,6 +56,9 @@ pub enum ConnectionManagerEvent {
         next_resource_request: NextResourceRequest,
         data_connection_type: DataConnectionType,
     },
+    /// File descriptor or -1 if there is no USB accessory connected.
+    AndroidUsbAccessoryFileDescriptor(i32),
+    AndroidQuitAndroidUsbManager,
     Internal(CmInternalEventWrapper),
 }
 
@@ -409,6 +412,7 @@ impl ConnectionManager {
         let mut listener: Option<ConnectionListenerHandle> = None;
         let mut usb_manager: Option<UsbManagerHandle> = None;
 
+        // Android requires that UsbManager is running.
         usb_manager = Some(UsbManager::start_task(self.r_sender.clone(), self.config.clone()));
 
         loop {
@@ -590,10 +594,18 @@ impl ConnectionManager {
                     }
                 }
             }
+            ConnectionManagerEvent::AndroidUsbAccessoryFileDescriptor(fd) => {
+                usb_handle
+                    .expect("UsbManager is not running.")
+                    .send_event(UsbEvent::AndroidUsbAccessoryFileDescriptor(fd)).await;
+            }
+            ConnectionManagerEvent::AndroidQuitAndroidUsbManager => {
+                usb_handle
+                    .expect("UsbManager is not running.")
+                    .send_event(UsbEvent::AndroidQuitAndroidUsbManager).await;
+            }
         }
     }
-
-
 }
 
 #[derive(Debug)]

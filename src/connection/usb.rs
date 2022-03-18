@@ -5,6 +5,9 @@
 #[cfg(target_os = "linux")]
 mod libusb;
 
+#[cfg(target_os = "android")]
+mod android;
+
 use tokio::{sync::{oneshot, mpsc::Receiver}, task::JoinHandle};
 
 use crate::{message_router::{RouterSender}, utils::{QuitReceiver, QuitSender, SendDownward}, config::{LogicConfig, EVENT_CHANNEL_SIZE}};
@@ -20,6 +23,9 @@ use super::data::{usb::{UsbDataConnectionSender, UsbDataConnectionReceiver}};
 pub enum UsbEvent {
     ReceiveAudioOverUsb(UsbDataConnectionSender),
     SendAudioOverUsb(UsbDataConnectionReceiver),
+    /// File descriptor or -1 if there is no USB accessory connected.
+    AndroidUsbAccessoryFileDescriptor(i32),
+    AndroidQuitAndroidUsbManager,
 }
 
 pub struct UsbManagerHandle {
@@ -146,17 +152,94 @@ impl UsbManager {
 
     #[cfg(target_os = "android")]
     async fn run(mut self) {
+        use std::time::Duration;
+
         use log::info;
+        use tokio::net::TcpListener;
+
+        use crate::{ui::UiEvent, connection::{usb::android::AndroidUsbThread, tcp::ListenerError, CmInternalEvent}, config};
+
+        let mut timer = tokio::time::interval(Duration::from_secs(1));
+        let mut android_usb_fd_request_sent = false;
+
+        let mut android_usb: Option<AndroidUsbThread> = None;
+
+        let usb_json_listener = match TcpListener::bind(config::USB_JSON_SOCKET_ADDRESS).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                let e = ListenerError::BindJsonSocket(e);
+                let e = CmInternalEvent::UsbTcpListenerError(e).into();
+
+                tokio::select! {
+                    result = &mut self.quit_receiver => return result.unwrap(),
+                    _ = self.r_sender.send_connection_manager_event(e) => (),
+                };
+
+                // Wait quit message.
+                self.quit_receiver.await.unwrap();
+                return;
+            }
+        };
+
 
         loop {
             tokio::select! {
                 result = &mut self.quit_receiver => break result.unwrap(),
                 event = self.usb_receiver.recv() => {
-                    info!("{event:?}");
+                    match event.unwrap() {
+                        UsbEvent::AndroidUsbAccessoryFileDescriptor(fd) => {
+                            android_usb_fd_request_sent = false;
+
+                            if fd != -1 {
+                                info!("Fd received: {}", fd);
+                                if let Some(handle) = android_usb.take() {
+                                    handle.quit();
+                                }
+
+                                android_usb = Some(AndroidUsbThread::start(self.r_sender.clone(), self.config.clone(), fd));
+                            }
+                        }
+                        UsbEvent::AndroidQuitAndroidUsbManager => {
+                            if let Some(android_usb) = android_usb.take() {
+                                android_usb.quit()
+                            }
+                        }
+                        event => {
+                            if let Some(usb_thread) = android_usb.as_mut() {
+                                usb_thread.send_event(event);
+                            }
+                        }
+                    }
                 }
+                _ = timer.tick() => {
+                    if android_usb.is_none() && !android_usb_fd_request_sent {
+                        android_usb_fd_request_sent = true;
+                        self.r_sender.send_ui_event(UiEvent::AndroidGetUsbAccessoryFileDescriptor).await;
+                    }
+                }
+                result = usb_json_listener.accept() => {
+                    match result {
+                        Ok((stream, address)) => {
+                            self.r_sender.send_connection_manager_event(
+                                CmInternalEvent::NewJsonStream { stream, address, usb: true }.into(),
+                            ).await;
+                        }
+                        Err(error) => {
+                            let e = ListenerError::AcceptJsonConnection(error);
+                            self.r_sender.send_connection_manager_event(
+                                CmInternalEvent::ListenerError(e).into()
+                            ).await;
+
+                            break;
+                        }
+                    }
+                },
             }
         }
 
+        if let Some(android_usb) = android_usb.take() {
+            android_usb.quit()
+        }
     }
 }
 

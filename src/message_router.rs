@@ -174,6 +174,12 @@ impl RouterSender {
             .blocking_send(RouterMessage::Router(event))
             .unwrap()
     }
+
+    pub fn send_connection_manager_event_blocking(&mut self, event: ConnectionManagerEvent) {
+        self.sender
+            .blocking_send(RouterMessage::ConnectionManager(event))
+            .unwrap()
+    }
 }
 
 /// Receive routed messages.
