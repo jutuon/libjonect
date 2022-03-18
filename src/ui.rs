@@ -116,7 +116,7 @@ impl UiConnectionManager {
         loop {
             tokio::select! {
                 event = &mut quit_receiver => return event.unwrap(),
-                message = self.ui_receiver.recv() => {
+                message = self.ui_receiver.recv(), if cfg!(not(target_os = "android")) => {
                     drop(message);
                 }
                 listener_result = listener.accept() => {
