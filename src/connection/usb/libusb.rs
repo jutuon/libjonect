@@ -210,6 +210,8 @@ impl LibUsbLogic {
                     accessory.set_audio_receiver(receiver);
                 }
             }
+            UsbEvent::AndroidQuitAndroidUsbManager |
+            UsbEvent::AndroidUsbAccessoryFileDescriptor(_) => (),
         }
     }
 
