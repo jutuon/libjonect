@@ -160,9 +160,6 @@ impl UsbManager {
 
         use crate::{ui::UiEvent, connection::{usb::android::AndroidUsbThread, tcp::ListenerError, CmInternalEvent}, config};
 
-        let mut timer = tokio::time::interval(Duration::from_secs(1));
-        let mut android_usb_fd_request_sent = false;
-
         let mut android_usb: Option<AndroidUsbThread> = None;
 
         let usb_json_listener = match TcpListener::bind(config::USB_JSON_SOCKET_ADDRESS).await {
@@ -189,8 +186,6 @@ impl UsbManager {
                 event = self.usb_receiver.recv() => {
                     match event.unwrap() {
                         UsbEvent::AndroidUsbAccessoryFileDescriptor(fd) => {
-                            android_usb_fd_request_sent = false;
-
                             if fd != -1 {
                                 info!("Fd received: {}", fd);
                                 if let Some(handle) = android_usb.take() {
@@ -210,12 +205,6 @@ impl UsbManager {
                                 usb_thread.send_event(event);
                             }
                         }
-                    }
-                }
-                _ = timer.tick() => {
-                    if android_usb.is_none() && !android_usb_fd_request_sent {
-                        android_usb_fd_request_sent = true;
-                        self.r_sender.send_ui_event(UiEvent::AndroidGetUsbAccessoryFileDescriptor).await;
                     }
                 }
                 result = usb_json_listener.accept() => {
