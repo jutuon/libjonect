@@ -67,7 +67,7 @@ impl From<DeviceManagerInternalEvent> for DmEvent {
 #[derive(Debug)]
 pub enum DeviceManagerEvent {
     RunDeviceConnectionPing,
-    NewDeviceConnection(JsonConnection),
+    NewDeviceConnection { json_connection: JsonConnection, usb: bool },
     UiNativeSampleRate(ConnectionId, AndroidAudioInfo),
     DisconnectAllDevices,
 }
@@ -143,11 +143,12 @@ impl DeviceManager {
                         connection.send(DeviceEvent::SendPing).await;
                     }
                 }
-                DeviceManagerEvent::NewDeviceConnection(connection) => {
-                    let id = connection.id();
+                DeviceManagerEvent::NewDeviceConnection { json_connection, usb } => {
+                    let id = json_connection.id();
 
                     let device_state = DeviceStateTask::task(
-                        connection,
+                        json_connection,
+                        usb,
                         self.r_sender.clone(),
                         self.config.clone(),
                     )

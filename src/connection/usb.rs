@@ -8,21 +8,38 @@ mod libusb;
 #[cfg(target_os = "android")]
 mod android;
 
+pub mod protocol;
+
 use tokio::{sync::{oneshot, mpsc::Receiver}, task::JoinHandle};
 
 use crate::{message_router::{RouterSender}, utils::{QuitReceiver, QuitSender, SendDownward}, config::{LogicConfig, EVENT_CHANNEL_SIZE}};
 
 
-use std::sync::{Arc};
+use std::{sync::{Arc}, fmt::Debug};
 
-use super::data::{usb::{UsbDataConnectionSender, UsbDataConnectionReceiver}};
+use super::data::{usb::{UsbDataConnectionSender, UsbDataConnectionReceiver, UsbDataConnectionBuilder}, DataSender, DataSenderBuilder, DataReceiverBuilder};
 
+
+#[cfg(target_os = "linux")]
+pub use self::libusb::{UsbPacketWrapper, UsbDataChannelCreator, UsbDataChannelReceiver};
+
+#[cfg(target_os = "android")]
+pub use self::android::{UsbPacketWrapper, UsbDataChannelCreator, UsbDataChannelReceiver};
+
+pub trait UsbDataChannelCreatorI {
+    fn build_sender(&self) -> (DataSenderBuilder, DataReceiverBuilder) {
+        UsbDataConnectionBuilder::build_sender()
+    }
+
+    fn build_receiver(&self) -> (UsbDataConnectionSender, DataReceiverBuilder) {
+        UsbDataConnectionBuilder::build_receiver()
+    }
+}
 
 
 #[derive(Debug)]
 pub enum UsbEvent {
     ReceiveAudioOverUsb(UsbDataConnectionSender),
-    SendAudioOverUsb(UsbDataConnectionReceiver),
     /// File descriptor or -1 if there is no USB accessory connected.
     AndroidUsbAccessoryFileDescriptor(i32),
     AndroidQuitAndroidUsbManager,
@@ -52,12 +69,14 @@ pub struct UsbManager {
     quit_receiver: QuitReceiver,
     config: Arc<LogicConfig>,
     usb_receiver: Receiver<UsbEvent>,
+    usb_data_channel_receiver: UsbDataChannelReceiver,
 }
 
 impl UsbManager {
     pub fn start_task(
         r_sender: RouterSender,
         config: Arc<LogicConfig>,
+        usb_data_channel_receiver: UsbDataChannelReceiver,
     ) -> UsbManagerHandle {
         let (quit_sender, quit_receiver) = oneshot::channel();
 
@@ -69,6 +88,7 @@ impl UsbManager {
             quit_receiver,
             config,
             usb_receiver,
+            usb_data_channel_receiver,
         };
 
         let task = async move {
@@ -107,12 +127,12 @@ impl UsbManager {
             }
         };
 
-        let mut usb_thread = self::libusb::LibUsbThread::start(self.r_sender.clone(), self.config).await;
+        let mut usb_thread = self::libusb::LibUsbThread::start(self.r_sender.clone(), self.config, self.usb_data_channel_receiver).await;
 
         // TODO: Do not poll USB devices.
         let mut timer = tokio::time::interval(Duration::from_secs(2));
 
-        let mut json_poll_timer = tokio::time::interval(Duration::from_millis(500));
+        let mut json_poll_timer = tokio::time::interval(Duration::from_millis(50));
 
         loop {
             tokio::select! {
@@ -230,86 +250,5 @@ impl UsbManager {
         if let Some(android_usb) = android_usb.take() {
             android_usb.quit()
         }
-    }
-}
-
-pub const USB_EMPTY_PACKET: u8 = 1;
-
-#[derive(Debug, Clone, Copy)]
-#[repr(u8)]
-pub enum UsbPacketOutType {
-    Empty = USB_EMPTY_PACKET,
-    /// Normal JSON message stream.
-    JsonStream,
-    /// Normal audio data stream.
-    AudioData,
-    NextIsWrite,
-}
-
-
-impl From<UsbPacketOutType> for u8 {
-    fn from(packet_type: UsbPacketOutType) -> Self {
-        packet_type as u8
-    }
-}
-
-
-#[derive(Debug)]
-#[repr(u8)]
-pub enum UsbPacketInType {
-    Empty = USB_EMPTY_PACKET,
-    /// Normal JSON message stream.
-    JsonStream,
-}
-
-impl From<UsbPacketInType> for u8 {
-    fn from(packet_type: UsbPacketInType) -> Self {
-        packet_type as u8
-    }
-}
-
-pub const USB_PACKET_MAX_DATA_SIZE: u16 = 512-3;
-
-pub struct UsbPacket {
-    data: [u8; 512],
-}
-
-impl UsbPacket {
-    pub fn new() -> UsbPacket {
-        let mut data = [0; 512];
-        data[0] = USB_EMPTY_PACKET;
-
-        Self {
-            data,
-        }
-    }
-
-    pub fn set_packet_type(&mut self, packet_type: u8) {
-        self.data[0] = packet_type;
-    }
-
-    pub fn raw(&self) -> &[u8; 512] {
-        &self.data
-    }
-
-    /// Max size is USB_PACKET_MAX_DATA_SIZE.
-    pub fn set_size(&mut self, size: u16) {
-        assert!(size <= USB_PACKET_MAX_DATA_SIZE);
-
-        let [byte1, byte2] = size.to_be_bytes();
-        self.data[1] = byte1;
-        self.data[2] = byte2;
-    }
-
-    pub fn data(&self) -> &[u8] {
-        let size = u16::from_be_bytes([self.data[1], self.data[2]]) as usize;
-        let (_, packet_data) = self.data.split_at(3);
-        &packet_data[..size]
-    }
-
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        let size = u16::from_be_bytes([self.data[1], self.data[2]]) as usize;
-        let (_, packet_data) = self.data.split_at_mut(3);
-        &mut packet_data[..size]
     }
 }

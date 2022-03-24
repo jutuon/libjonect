@@ -6,7 +6,7 @@
 
 use std::{net::{UdpSocket, IpAddr, ToSocketAddrs, SocketAddr}, time::Duration, io::{self, ErrorKind}, sync::mpsc::{Receiver, Sender, SendError, RecvTimeoutError, TryRecvError, RecvError}};
 
-use crate::{connection::{data::MAX_PACKET_SIZE, usb::{USB_PACKET_MAX_DATA_SIZE, UsbPacket}}, config::{DATA_PORT_UDP_SEND, DATA_PORT_UDP_SEND_ADDRESS, DATA_PORT_UDP_RECEIVE, DATA_PORT_UDP_RECEIVE_ADDRESS}};
+use crate::{connection::{data::MAX_PACKET_SIZE, usb::{protocol::{USB_PACKET_MAX_DATA_SIZE, UsbPacket}, UsbPacketWrapper}}, config::{DATA_PORT_UDP_SEND, DATA_PORT_UDP_SEND_ADDRESS, DATA_PORT_UDP_RECEIVE, DATA_PORT_UDP_RECEIVE_ADDRESS}};
 
 use super::{DataSenderInterface, DataReceiverInterface, DataReceiverBuilderInterface, DataReceiverBuilder, DataSenderBuilderInterface, DataSenderBuilder};
 
@@ -15,17 +15,17 @@ use super::{DataSenderInterface, DataReceiverInterface, DataReceiverBuilderInter
 pub struct UsbDataConnectionBuilder;
 
 impl UsbDataConnectionBuilder {
-    pub fn build_sender() -> (DataSenderBuilder, UsbDataConnectionReceiver) {
+    pub fn build_sender() -> (DataSenderBuilder, DataReceiverBuilder) {
         let (sender, receiver) = std::sync::mpsc::channel();
 
         let usb_sender = Box::new(UsbDataConnectionSender {
             sender,
         });
 
-        let usb_receiver = UsbDataConnectionReceiver {
+        let usb_receiver = Box::new(UsbDataConnectionReceiver {
             receiver,
             timeout: None,
-        };
+        });
 
         (usb_sender, usb_receiver)
     }
@@ -49,7 +49,15 @@ impl UsbDataConnectionBuilder {
 
 #[derive(Debug)]
 pub struct UsbDataConnectionSender {
-    sender: Sender<UsbPacket>,
+    sender: Sender<UsbPacketWrapper>,
+}
+
+impl UsbDataConnectionSender {
+    pub fn new(sender: Sender<UsbPacketWrapper>) -> Self {
+        Self {
+            sender,
+        }
+    }
 }
 
 impl DataSenderBuilderInterface for UsbDataConnectionSender {
@@ -70,7 +78,7 @@ impl DataSenderInterface for UsbDataConnectionSender {
     fn send_packet(&mut self, packet: &[u8]) -> Result<(), std::io::Error> {
         assert!(packet.len() <= USB_PACKET_MAX_DATA_SIZE as usize);
 
-        let mut usb_packet = UsbPacket::new();
+        let mut usb_packet = UsbPacketWrapper::new();
         usb_packet.set_size(packet.len() as u16);
 
         for (target, src) in usb_packet.data_mut().iter_mut().zip(packet.iter()) {
@@ -84,20 +92,20 @@ impl DataSenderInterface for UsbDataConnectionSender {
 
 #[derive(Debug)]
 pub struct UsbDataConnectionReceiver {
-    receiver: Receiver<UsbPacket>,
+    receiver: Receiver<UsbPacketWrapper>,
     timeout: Option<Duration>,
 }
 
 impl UsbDataConnectionReceiver {
-    pub fn try_recv(&mut self) -> Result<UsbPacket, TryRecvError> {
+    pub fn try_recv(&mut self) -> Result<UsbPacketWrapper, TryRecvError> {
         self.receiver.try_recv()
     }
 
-    pub fn recv(&mut self) -> Result<UsbPacket, RecvError> {
+    pub fn recv(&mut self) -> Result<UsbPacketWrapper, RecvError> {
         self.receiver.recv()
     }
 
-    pub fn raw_recv_mut(&mut self) -> &mut Receiver<UsbPacket> {
+    pub fn raw_recv_mut(&mut self) -> &mut Receiver<UsbPacketWrapper> {
         &mut self.receiver
     }
 }

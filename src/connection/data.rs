@@ -57,3 +57,31 @@ pub type DataSenderBuilder = Box<dyn DataSenderBuilderInterface>;
 pub type DataReceiverBuilder = Box<dyn DataReceiverBuilderInterface>;
 pub type DataSender = Box<dyn DataSenderInterface>;
 pub type DataReceiver = Box<dyn DataReceiverInterface>;
+
+
+#[derive(Debug)]
+pub struct EmptyReceiver;
+
+impl DataReceiverBuilderInterface for EmptyReceiver {
+    fn is_reliable_connection(&self) -> bool {
+        false
+    }
+
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    fn build(self: Box<Self>) -> Box<dyn DataReceiverInterface> {
+        self
+    }
+}
+
+impl DataReceiverInterface for EmptyReceiver {
+    fn is_reliable_connection(&self) -> bool {
+        false
+    }
+
+    fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
+        Ok(0)
+    }
+}

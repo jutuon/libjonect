@@ -11,6 +11,7 @@ use crate::{message_router::RouterSender, config::{LogicConfig, self}, connectio
 
 use super::{UsbEvent, UsbPacketOutType, UsbPacketInType, USB_PACKET_MAX_DATA_SIZE};
 
+pub type UsbPacketWrapper = UsbPacket;
 
 pub enum AndroidUsbEvent {
     RequestQuit,

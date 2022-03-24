@@ -99,12 +99,14 @@ pub struct DeviceStateTask {
     config: Arc<LogicConfig>,
     recording_native_sample_rate: Option<i32>,
     android_audio_info: ValueRequest<AndroidAudioInfo, AudioInfoRequestMessages>,
+    usb: bool,
 }
 
 impl DeviceStateTask {
     /// Start new `DeviceStateTask`.
     pub async fn task(
         connection: JsonConnection,
+        usb: bool,
         r_sender: RouterSender,
         config: Arc<LogicConfig>,
     ) -> DeviceStateTaskHandle {
@@ -137,6 +139,7 @@ impl DeviceStateTask {
             config,
             recording_native_sample_rate: None,
             android_audio_info: ValueRequest::new(),
+            usb,
         };
 
         let task_handle = tokio::spawn(device_task.run(quit_receiver));
@@ -256,7 +259,9 @@ impl DeviceStateTask {
                     AudioFormat::Pcm
                 };
 
-                let data_connection_type = if self.config.enable_udp_audio_data_sending {
+                let data_connection_type = if self.usb {
+                    DataConnectionType::Usb
+                } else if self.config.enable_udp_audio_data_sending {
                     DataConnectionType::Udp
                 } else {
                     DataConnectionType::Tcp
