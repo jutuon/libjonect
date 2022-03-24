@@ -212,7 +212,12 @@ impl UsbManager {
                                     handle.quit();
                                 }
 
-                                android_usb = Some(AndroidUsbThread::start(self.r_sender.clone(), self.config.clone(), fd));
+                                match AndroidUsbThread::start(self.r_sender.clone(), self.config.clone(), fd) {
+                                    Ok(thread) => {
+                                        android_usb = Some(thread);
+                                    }
+                                    Err(()) => (),
+                                }
                             }
                         }
                         UsbEvent::AndroidQuitAndroidUsbManager => {

@@ -17,7 +17,7 @@ pub struct OboeInfo {
     pub frames_per_burst: i32,
 }
 
-use crate::{connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::LogicConfig};
+use crate::{connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::LogicConfig, utils::android::config_thread_priority};
 
 use self::normal_mode::OboeCppNormalMode;
 
@@ -618,31 +618,6 @@ impl DataReaderThread {
     }
 }
 
-/// Set thread priority for current thread.
-fn config_thread_priority(name: &str) {
-    let result = unsafe {
-        // Set thread priority for current thread. Currently on Linux
-        // libc::setpriority will set thread nice value but this might
-        // change in the future. Alternative would be sched_setattr system
-        // call. Value of Android API constant Process.THREAD_PRIORITY_AUDIO
-        // is -16.
-        libc::setpriority(libc::PRIO_PROCESS, 0, -16)
-    };
-
-    if result == -1 {
-        error!("Setting thread priority failed.");
-    }
-
-    let get_result = unsafe {
-        libc::getpriority(libc::PRIO_PROCESS, 0)
-    };
-
-    if get_result == -1 {
-        error!("libc::getpriority returned -1 which might be error or not.");
-    } else {
-        info!("Thread priority for thread '{}' is now {}.", name, get_result);
-    }
-}
 
 #[derive(Debug, PartialEq)]
 enum PacketStatus {

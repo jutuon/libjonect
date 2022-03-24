@@ -4,6 +4,9 @@
 
 //! Some utility types.
 
+#[cfg(target_os = "android")]
+pub mod android;
+
 use bytes::BytesMut;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{

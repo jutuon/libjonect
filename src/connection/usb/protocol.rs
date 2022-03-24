@@ -5,6 +5,8 @@
 
 pub const USB_PACKET_MAX_DATA_SIZE: u16 = 512-3;
 
+pub const USB_IN_PACKET_MAX_DATA_SIZE: u16 = 64 - 3;
+
 pub const USB_EMPTY_PACKET: u8 = 1;
 
 #[derive(Debug, Clone, Copy)]
