@@ -157,6 +157,10 @@ impl DataReceiverInterface for UdpDataConnection {
         false
     }
 
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {
+        self.udp_socket.set_read_timeout(timeout)
+    }
+
     fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         loop {
             let (size, address) = self.udp_socket.recv_from(buffer)?;

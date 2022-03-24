@@ -69,6 +69,7 @@ pub enum DeviceManagerEvent {
     RunDeviceConnectionPing,
     NewDeviceConnection { json_connection: JsonConnection, usb: bool },
     UiNativeSampleRate(ConnectionId, AndroidAudioInfo),
+    SendStartAudioStream(ConnectionId),
     DisconnectAllDevices,
 }
 
@@ -159,6 +160,11 @@ impl DeviceManager {
                 DeviceManagerEvent::UiNativeSampleRate(id, native_sample_rate) => {
                     if let Some(device) = self.connections.get_mut(&id) {
                         device.send(DeviceEvent::UiNativeSampleRate(native_sample_rate)).await;
+                    }
+                }
+                DeviceManagerEvent::SendStartAudioStream(id) => {
+                    if let Some(device) = self.connections.get_mut(&id) {
+                        device.send(DeviceEvent::SendStartAudioStream).await;
                     }
                 }
                 DeviceManagerEvent::DisconnectAllDevices => {

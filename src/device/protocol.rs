@@ -117,4 +117,7 @@ pub enum DeviceMessage {
     GetNativeSampleRate,
     /// Native sample rate of device which send this message.
     NativeSampleRate(NativeSampleRate),
+    /// Device which handles PlayAudioStream message will send this after
+    /// receiving PlayAudioStream.
+    StartAudioStream,
 }

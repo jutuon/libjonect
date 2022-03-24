@@ -93,6 +93,10 @@ impl DataReceiverInterface for TcpDataConnection {
         true
     }
 
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {
+        self.tcp_stream.set_read_timeout(timeout)
+    }
+
     fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         let mut size_bytes = [0u8; 2];
         self.tcp_stream.read_exact(&mut size_bytes)?;

@@ -249,6 +249,7 @@ impl ConnectionResources {
                             sample_rate,
                             android_info,
                             decode_opus,
+                            sender_id: self.id,
                         }),
                         Some(UsbEvent::ReceiveAudioOverUsb(sender))
                     )
@@ -285,6 +286,7 @@ impl ConnectionResources {
                         sample_rate,
                         android_info,
                         decode_opus,
+                        sender_id: self.id,
                     }), None)
                 } else {
                     warn!("PlayAudio resource is not available.");
@@ -345,6 +347,7 @@ impl ConnectionResources {
                                     sample_rate,
                                     android_info,
                                     decode_opus,
+                                    sender_id: self.id,
                                 }), None)
                             },
                             Err(e) => {

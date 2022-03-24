@@ -9,7 +9,7 @@ pub mod normal_mode;
 use log::{error, info, warn, debug};
 
 
-use std::{thread::JoinHandle, sync::{atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver, SyncSender, self, TrySendError}, Arc}, io::{Read, ErrorKind}, time::Duration, num::Wrapping, collections::VecDeque};
+use std::{thread::JoinHandle, sync::{atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver, SyncSender, self, TrySendError}, Arc}, io::{Read, ErrorKind}, time::{Duration, Instant}, num::Wrapping, collections::VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct OboeInfo {
@@ -17,7 +17,7 @@ pub struct OboeInfo {
     pub frames_per_burst: i32,
 }
 
-use crate::{connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::LogicConfig, utils::android::config_thread_priority};
+use crate::{connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::LogicConfig, utils::{android::config_thread_priority, ConnectionId}, message_router::RouterSender, audio::oboe::callback_mode::PcmReceiver, device::DeviceManagerEvent};
 
 use self::normal_mode::OboeCppNormalMode;
 
@@ -57,13 +57,13 @@ pub struct OboeThread {
 }
 
 impl OboeThread {
-    pub fn new(config: Arc<LogicConfig>) -> Self {
+    pub fn new(r_sender: RouterSender, config: Arc<LogicConfig>) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
 
         let s = sender.clone();
         let handle = std::thread::spawn(move || {
             config_thread_priority("OboeThread");
-            OboeLogic::new(s, receiver, config).run();
+            OboeLogic::new(r_sender, s, receiver, config).run();
         });
 
         Self {
@@ -186,6 +186,12 @@ impl NormalModeState {
 }
 
 pub enum OboeMode {
+    Direct {
+        oboe_info: OboeInfo,
+        callback_oboe: OboeCppCallbackMode,
+        start_timer: Option<Instant>,
+        sender_id: ConnectionId,
+    },
     Callback {
         oboe_info: OboeInfo,
         data_reader_thread: DataReaderThread,
@@ -199,6 +205,12 @@ pub enum OboeMode {
 impl OboeMode {
     fn quit(self) {
         match self {
+            OboeMode::Direct {
+                callback_oboe,
+                ..
+            } => {
+                callback_oboe.quit();
+            }
             OboeMode::Callback {
                 data_reader_thread,
                 callback_oboe,
@@ -221,6 +233,7 @@ impl OboeMode {
 
     fn request_start(&mut self) {
         match self {
+            OboeMode::Direct { callback_oboe, ..} |
             OboeMode::Callback { callback_oboe, ..} => {
                 callback_oboe.request_start();
             }
@@ -232,6 +245,7 @@ impl OboeMode {
 
     fn check_underruns(&mut self) {
         match self {
+            OboeMode::Direct { callback_oboe, ..} |
             OboeMode::Callback { callback_oboe, ..} => {
                 callback_oboe.check_underruns();
             }
@@ -240,11 +254,22 @@ impl OboeMode {
             }
         }
     }
+
+    fn check_callback_mode_errors(&self) -> bool {
+        match self {
+            OboeMode::Direct { callback_oboe, ..} |
+            OboeMode::Callback { callback_oboe, ..} => {
+                callback_oboe.error_occurred()
+            }
+            OboeMode::Normal { .. } => false,
+        }
+    }
 }
 
 struct StopAudio;
 
 struct OboeLogic {
+    r_sender: RouterSender,
     sender: Sender<OboeEvent>,
     receiver: Receiver<OboeEvent>,
     oboe_mode: Option<OboeMode>,
@@ -252,8 +277,9 @@ struct OboeLogic {
 }
 
 impl OboeLogic {
-    fn new(sender: Sender<OboeEvent>, receiver: Receiver<OboeEvent>, config: Arc<LogicConfig>) -> Self {
+    fn new(r_sender: RouterSender, sender: Sender<OboeEvent>, receiver: Receiver<OboeEvent>, config: Arc<LogicConfig>) -> Self {
         Self {
+            r_sender,
             sender,
             receiver,
             oboe_mode: None,
@@ -311,8 +337,26 @@ impl OboeLogic {
                 }
 
                 OboeEvent::UnderrunCheckTimer => {
-                    if let Some(oboe) = self.oboe_mode.as_mut() {
+                    if let Some(mut oboe) = self.oboe_mode.as_mut() {
                         oboe.check_underruns();
+
+                        if let OboeMode::Direct { start_timer, sender_id, ..} = &mut oboe {
+                            match start_timer {
+                                Some(timer) => {
+                                    if Instant::now().duration_since(*timer) >= Duration::from_secs(1) {
+                                        *start_timer = None;
+                                        self.r_sender.send_device_manager_event_blocking(
+                                            DeviceManagerEvent::SendStartAudioStream(*sender_id)
+                                        );
+                                    }
+                                }
+                                None => (),
+                            }
+                        }
+
+                        if oboe.check_callback_mode_errors() {
+                            self.quit_data_reader_and_oboe();
+                        }
                     }
                 }
             }
@@ -334,6 +378,7 @@ impl OboeLogic {
                 decode_opus,
                 sample_rate,
                 android_info,
+                sender_id,
              } => {
                 // TODO: Opus decoding.
                 assert!(!decode_opus);
@@ -345,17 +390,42 @@ impl OboeLogic {
                     return None;
                 }
 
+                let oboe_info = OboeInfo {
+                    sample_rate: if decode_opus { 48000 } else { sample_rate },
+                    frames_per_burst,
+                };
+
+                if !decode_opus && send_handle.is_reliable_connection() {
+                    if let Err(e) = send_handle.set_timeout(None) {
+                        error!("Error: {e}");
+                        return None;
+                    }
+
+                    let callback_oboe = OboeCppCallbackMode::new(PcmReceiver::DirectReceiver(send_handle.build()), oboe_info.clone());
+
+                    let mut oboe_mode = OboeMode::Direct {
+                        callback_oboe,
+                        oboe_info,
+                        start_timer: Some(Instant::now()),
+                        sender_id,
+                    };
+
+                    oboe_mode.request_start();
+                    self.oboe_mode = Some(oboe_mode);
+
+                    // StartAudioStream device message will be sent after the timer.
+
+                    info!("Oboe direct mode enabled.");
+
+                    return None;
+                }
+
                 if let Err(e) = send_handle.set_timeout(Some(Duration::from_millis(10))) {
                     error!("Error: {e}");
                     return None;
                 }
 
                 let send_handle = send_handle.build();
-
-                let oboe_info = OboeInfo {
-                    sample_rate: if decode_opus { 48000 } else { sample_rate },
-                    frames_per_burst,
-                };
 
                 let callback_mode = true;
 
@@ -372,7 +442,10 @@ impl OboeLogic {
                         self.config.clone(),
                     );
 
-                    let callback_oboe = OboeCppCallbackMode::new(pcm_data_receiver, oboe_info.clone());
+                    let callback_oboe = OboeCppCallbackMode::new(
+                        PcmReceiver::AudioDataBlock(pcm_data_receiver),
+                        oboe_info.clone()
+                    );
 
                     self.oboe_mode = Some(OboeMode::Callback {
                         callback_oboe,
@@ -388,6 +461,8 @@ impl OboeLogic {
                     });
                 }
 
+                self.r_sender.send_device_manager_event_blocking(DeviceManagerEvent::SendStartAudioStream(sender_id));
+
                 None
             }
             AudioEvent::StopPlayingAudio => {
@@ -395,6 +470,7 @@ impl OboeLogic {
             }
             AudioEvent::StartRecording { .. } |
             AudioEvent::StopRecording |
+            AudioEvent::StartAudioStream |
             AudioEvent::Message(_)  => None,
         }
     }

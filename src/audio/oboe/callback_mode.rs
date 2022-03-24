@@ -6,10 +6,10 @@
 
 use log::{error};
 
-use std::{sync::{atomic::{Ordering, AtomicU32}, mpsc::{Receiver}}, process::abort};
+use std::{sync::{atomic::{Ordering, AtomicU32, AtomicBool}, mpsc::{Receiver}}, process::abort, io::ErrorKind};
 
 
-use crate::audio::oboe::AUDIO_BLOCK_SAMPLE_COUNT;
+use crate::{audio::oboe::AUDIO_BLOCK_SAMPLE_COUNT, connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::{RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES, RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES}};
 
 use super::{AudioDataBlock, AUDIO_CHANNEL_COUNT, OBOE_BUFFER_BURST_COUNT, cpp_bridge::{OBOE_CPP_IS_RUNNING, start_oboe_in_callback_mode, oboe_request_start, close_oboe, STATUS_ERROR, check_underruns}, OboeInfo};
 
@@ -18,57 +18,115 @@ static mut CALLBACK_STATE: Option<CallbackState> = None;
 
 static RECV_BLOCKING_COUNT: AtomicU32 = AtomicU32::new(0);
 
+static CALLBACK_ERROR_DETECTED: AtomicBool = AtomicBool::new(false);
+
+enum BufferAndReceiver {
+    AudioDataBlock(Receiver<AudioDataBlock>, AudioDataBlock),
+    // Note that MAX_PACKET_SIZE % 2 != 0, but this should not be a problem as
+    // audio data is 16-bit samples and sending code should send complete audio
+    // frames.
+    DirectReceiver {
+        receiver: DataReceiver,
+        conversion_buffer: [u8; MAX_PACKET_SIZE],
+        buffer: [i16; MAX_PACKET_SIZE/2],
+        stream_started: bool,
+    },
+}
+
 struct CallbackState {
-    pcm_data_receiver: Receiver<AudioDataBlock>,
-    current_data: AudioDataBlock,
+    pcm_data_receiver: BufferAndReceiver,
     samples_written: usize,
 }
 
 impl CallbackState {
-    fn new(pcm_data_receiver: Receiver<AudioDataBlock>) -> Self {
+    fn new(pcm_data_receiver: PcmReceiver) -> Self {
         Self {
-            pcm_data_receiver,
-            current_data: [0i16; AUDIO_BLOCK_SAMPLE_COUNT],
+            pcm_data_receiver: pcm_data_receiver.with_buffer(),
             samples_written: 0,
         }
     }
 
     fn all_current_data_written(&self) -> bool {
-        self.samples_written == AUDIO_BLOCK_SAMPLE_COUNT
+        match self.pcm_data_receiver {
+            BufferAndReceiver::AudioDataBlock(_, _) => self.samples_written == AUDIO_BLOCK_SAMPLE_COUNT,
+            BufferAndReceiver::DirectReceiver{ .. } => self.samples_written == RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES,
+        }
     }
 
     /// Max length for returned sample is `sample_request`.
     fn get_new_data(&mut self, sample_request: usize) -> Result<&[i16], ()> {
         if self.all_current_data_written() {
-            /*
-            self.current_data = loop {
-                match self.pcm_data_receiver.try_recv() {
-                    Ok(data) => {
-                        self.samples_written = 0;
-                        break data;
-                    },
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        RECV_BLOCKING_COUNT.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        return Err(());
-                    }
-                };
-            }
-            */
-
-            self.current_data = match self.pcm_data_receiver.recv() {
-                Ok(data) => {
-                    self.samples_written = 0;
-                    data
-                },
-                Err(_) => {
-                    return Err(());
+            match &mut self.pcm_data_receiver {
+                BufferAndReceiver::AudioDataBlock(receiver, buffer) => {
+                    *buffer = match receiver.recv() {
+                        Ok(data) => {
+                            self.samples_written = 0;
+                            data
+                        },
+                        Err(_) => {
+                            return Err(());
+                        }
+                    };
                 }
-            };
+                BufferAndReceiver::DirectReceiver { receiver, conversion_buffer, buffer, stream_started } => {
+                    let data = match receiver.recv_packet(conversion_buffer.as_mut_slice()) {
+                        Ok(0) => {
+                            return Err(());
+                        }
+                        Ok(size) => &conversion_buffer[..size],
+                        Err(e) => {
+                            match e.kind() {
+                                ErrorKind::WouldBlock => {
+                                    &[]
+                                }
+                                _ => {
+                                    return Err(());
+                                }
+                            }
+                        }
+                    };
+
+                    if data.is_empty() && *stream_started {
+                        // Buffer contains silence currently.
+                    } else if data.is_empty() {
+                        // This is probably a data sending bug.
+                        return Err(());
+                    } else {
+                        if !*stream_started {
+                            *stream_started = true;
+                            match receiver.set_timeout(None) {
+                                Ok(()) => (),
+                                Err(_) => return Err(()),
+                            }
+                        }
+
+                        // Direct mode is only enabled for reliable connections.
+
+                        let (_packet_counter_bytes, audio_data) = data.split_at(4);
+
+                        for (target, sample_bytes) in buffer.as_mut_slice().iter_mut().zip(audio_data.chunks_exact(2)) {
+                            match sample_bytes.try_into() {
+                                Ok(sample) => {
+                                    *target = i16::from_le_bytes(sample);
+                                }
+                                Err(_) => {
+                                    abort()
+                                }
+                            }
+                        }
+                    }
+
+                    self.samples_written = 0;
+                }
+            }
         }
 
-        let (_, unwritten_data) = self.current_data.split_at(self.samples_written);
+        let current_data = match &self.pcm_data_receiver {
+            BufferAndReceiver::AudioDataBlock(_, buffer) => buffer.as_slice(),
+            BufferAndReceiver::DirectReceiver { buffer, .. } => buffer.as_slice(),
+        };
+
+        let (_, unwritten_data) = current_data.split_at(self.samples_written);
 
         let max_sample_count = unwritten_data.len().min(sample_request);
         let (response_data, _) = unwritten_data.split_at(max_sample_count);
@@ -79,6 +137,24 @@ impl CallbackState {
     }
 }
 
+pub enum PcmReceiver {
+    AudioDataBlock(Receiver<AudioDataBlock>),
+    DirectReceiver(DataReceiver),
+}
+
+impl PcmReceiver {
+    fn with_buffer(self) -> BufferAndReceiver {
+        match self {
+            PcmReceiver::AudioDataBlock(r) => BufferAndReceiver::AudioDataBlock(r, [0i16; AUDIO_BLOCK_SAMPLE_COUNT]),
+            PcmReceiver::DirectReceiver(receiver) => BufferAndReceiver::DirectReceiver{
+                receiver,
+                conversion_buffer: [0; MAX_PACKET_SIZE],
+                buffer: [0i16; MAX_PACKET_SIZE/2],
+                stream_started: false,
+            },
+        }
+    }
+}
 
 pub struct OboeCppCallbackMode {
     previous_underrun_count: Option<i32>,
@@ -87,7 +163,7 @@ pub struct OboeCppCallbackMode {
 
 impl OboeCppCallbackMode {
     pub fn new(
-        pcm_data_receiver: Receiver<AudioDataBlock>,
+        pcm_data_receiver: PcmReceiver,
         oboe_info: OboeInfo,
     ) -> Self {
         if OBOE_CPP_IS_RUNNING.swap(true, Ordering::SeqCst) {
@@ -95,6 +171,7 @@ impl OboeCppCallbackMode {
         }
 
         RECV_BLOCKING_COUNT.store(0, Ordering::Relaxed);
+        CALLBACK_ERROR_DETECTED.store(false, Ordering::Relaxed);
 
         unsafe {
             CALLBACK_STATE = Some(CallbackState::new(pcm_data_receiver));
@@ -138,6 +215,10 @@ impl OboeCppCallbackMode {
             }
         }
     }
+
+    pub fn error_occurred(&self) -> bool {
+        CALLBACK_ERROR_DETECTED.load(Ordering::Relaxed)
+    }
 }
 
 
@@ -165,6 +246,7 @@ extern "C" fn write_data(
             Ok(value) => value,
             Err(()) => {
                 // Stop calling this callback.
+                CALLBACK_ERROR_DETECTED.store(true, Ordering::Relaxed);
                 return STATUS_ERROR;
             }
         };

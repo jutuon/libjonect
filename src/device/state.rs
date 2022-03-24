@@ -36,6 +36,7 @@ pub enum DeviceEvent {
     SendPing,
     UiNativeSampleRate(AndroidAudioInfo),
     Disconnect,
+    SendStartAudioStream,
 }
 
 /// Handle to `DeviceStateTask`.
@@ -228,6 +229,9 @@ impl DeviceStateTask {
             DeviceEvent::Disconnect => {
                 return Some(QuitMode::Disconnect);
             }
+            DeviceEvent::SendStartAudioStream => {
+                self.connection_handle.send_down(DeviceMessage::StartAudioStream).await;
+            }
         }
 
         None
@@ -381,6 +385,9 @@ impl DeviceStateTask {
                     m.handle(&mut self.connection_handle, &mut self.r_sender).await;
                 }
 
+            }
+            DeviceMessage::StartAudioStream => {
+                self.r_sender.send_audio_server_event(AudioEvent::StartAudioStream).await;
             }
         }
     }

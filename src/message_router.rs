@@ -180,6 +180,12 @@ impl RouterSender {
             .blocking_send(RouterMessage::ConnectionManager(event))
             .unwrap()
     }
+
+    pub fn send_device_manager_event_blocking(&mut self, event: DeviceManagerEvent) {
+        self.sender
+            .blocking_send(RouterMessage::DeviceManager(event.into()))
+            .unwrap()
+    }
 }
 
 /// Receive routed messages.

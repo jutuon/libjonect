@@ -130,6 +130,11 @@ impl DataReceiverInterface for UsbDataConnectionReceiver {
         true
     }
 
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {
+        self.timeout = timeout;
+        Ok(())
+    }
+
     fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         let packet = if let Some(timeout) = self.timeout {
             self.receiver.recv_timeout(timeout).map_err(|e| {

@@ -26,7 +26,7 @@ use crate::config::LogicConfig;
 use crate::connection::data::DataReceiverBuilder;
 use crate::connection::data::DataSenderBuilder;
 use crate::connection::data::MAX_PACKET_SIZE;
-use crate::utils::QuitReceiver;
+use crate::utils::{QuitReceiver, ConnectionId};
 use crate::utils::QuitSender;
 
 
@@ -39,13 +39,16 @@ pub enum AudioEvent {
         send_handle: DataSenderBuilder,
         sample_rate: u32,
     },
+    /// After receiving this command wait StartAudioStream.
     PlayAudio {
         send_handle: DataReceiverBuilder,
         sample_rate: i32,
         android_info: Option<PlayAudioEventAndroid>,
         decode_opus: bool,
+        sender_id: ConnectionId,
     },
     StopPlayingAudio,
+    StartAudioStream,
 }
 
 /// Android specific information for `AudioEvent::PlayAudio`.
@@ -198,7 +201,7 @@ impl AudioManager {
     /// Run `AudioManager` logic.
     #[cfg(target_os = "android")]
     async fn run(mut self) {
-        let mut oboe_thread = self::oboe::OboeThread::new(self.config.clone());
+        let mut oboe_thread = self::oboe::OboeThread::new(self.r_sender.clone(), self.config.clone());
 
         let mut timer = tokio::time::interval(Duration::from_secs(1));
 
