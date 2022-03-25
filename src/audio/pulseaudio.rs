@@ -20,7 +20,7 @@ use self::{
 
 use super::AudioEvent;
 
-use crate::{config::LogicConfig, message_router::RouterSender};
+use crate::{config::LogicConfig, message_router::RouterSender, connection::data::DataSenderBuilder};
 
 /// PulseAudio code events.
 #[derive(Debug)]
@@ -29,6 +29,11 @@ pub enum AudioServerEvent {
     RequestQuit,
     PAEvent(PAEvent),
     PAQuitReady,
+}
+
+struct PlayAudioInfo {
+    send_handle: DataSenderBuilder,
+    sample_rate: u32,
 }
 
 /// AudioServer which handles connection to the PulseAudio.
@@ -72,6 +77,7 @@ impl AudioServer {
         // Init glib mainloop.
         let glib_main_loop = MainLoop::new(Some(&context), false);
 
+        let mut play_audio_info = None;
         let glib_main_loop_clone = glib_main_loop.clone();
         receiver.attach(Some(&context), move |event| {
             match event {
@@ -83,15 +89,26 @@ impl AudioServer {
                         send_handle,
                         sample_rate,
                     } => {
-                        pa_state.start_recording(
-                            self.config.pa_source_name.clone(),
+                        play_audio_info = Some(PlayAudioInfo {
                             send_handle,
-                            self.config.encode_opus,
                             sample_rate,
-                        );
+                        });
                     }
                     AudioEvent::StopRecording => {
                         pa_state.stop_recording();
+                    }
+                    AudioEvent::StartAudioStream => {
+                        if let Some(PlayAudioInfo {
+                            send_handle,
+                            sample_rate,
+                        }) = play_audio_info.take() {
+                            pa_state.start_recording(
+                                self.config.pa_source_name.clone(),
+                                send_handle,
+                                self.config.encode_opus,
+                                sample_rate,
+                            );
+                        }
                     }
                     AudioEvent::Message(_) | AudioEvent::PlayAudio {..} | AudioEvent::StopPlayingAudio => (),
                 },
