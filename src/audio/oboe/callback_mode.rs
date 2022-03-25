@@ -9,7 +9,7 @@ use log::{error};
 use std::{sync::{atomic::{Ordering, AtomicU32, AtomicBool}, mpsc::{Receiver}}, process::abort, io::ErrorKind};
 
 
-use crate::{audio::oboe::AUDIO_BLOCK_SAMPLE_COUNT, connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::{RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES, RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES}};
+use crate::{audio::oboe::AUDIO_BLOCK_SAMPLE_COUNT, connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::{RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES, RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES, PCM_AUDIO_PACKET_SIZE_IN_BYTES}};
 
 use super::{AudioDataBlock, AUDIO_CHANNEL_COUNT, OBOE_BUFFER_BURST_COUNT, cpp_bridge::{OBOE_CPP_IS_RUNNING, start_oboe_in_callback_mode, oboe_request_start, close_oboe, STATUS_ERROR, check_underruns}, OboeInfo};
 
@@ -27,8 +27,8 @@ enum BufferAndReceiver {
     // frames.
     DirectReceiver {
         receiver: DataReceiver,
-        conversion_buffer: [u8; MAX_PACKET_SIZE],
-        buffer: [i16; MAX_PACKET_SIZE/2],
+        conversion_buffer: [u8; PCM_AUDIO_PACKET_SIZE_IN_BYTES],
+        buffer: [i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES],
         stream_started: bool,
     },
 }
@@ -86,7 +86,7 @@ impl CallbackState {
                         }
                     };
 
-                    if data.is_empty() && *stream_started {
+                    if data.is_empty() && !*stream_started {
                         // Buffer contains silence currently.
                     } else if data.is_empty() {
                         // This is probably a data sending bug.
@@ -94,7 +94,7 @@ impl CallbackState {
                     } else {
                         if !*stream_started {
                             *stream_started = true;
-                            match receiver.set_timeout(None) {
+                            match receiver.set_nonblocking(false) {
                                 Ok(()) => (),
                                 Err(_) => return Err(()),
                             }
@@ -148,8 +148,8 @@ impl PcmReceiver {
             PcmReceiver::AudioDataBlock(r) => BufferAndReceiver::AudioDataBlock(r, [0i16; AUDIO_BLOCK_SAMPLE_COUNT]),
             PcmReceiver::DirectReceiver(receiver) => BufferAndReceiver::DirectReceiver{
                 receiver,
-                conversion_buffer: [0; MAX_PACKET_SIZE],
-                buffer: [0i16; MAX_PACKET_SIZE/2],
+                conversion_buffer: [0; PCM_AUDIO_PACKET_SIZE_IN_BYTES],
+                buffer: [0i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES],
                 stream_started: false,
             },
         }

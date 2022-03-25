@@ -339,7 +339,6 @@ impl OboeLogic {
                 OboeEvent::UnderrunCheckTimer => {
                     if let Some(mut oboe) = self.oboe_mode.as_mut() {
                         oboe.check_underruns();
-
                         if let OboeMode::Direct { start_timer, sender_id, ..} = &mut oboe {
                             match start_timer {
                                 Some(timer) => {
@@ -355,6 +354,7 @@ impl OboeLogic {
                         }
 
                         if oboe.check_callback_mode_errors() {
+                            error!("Oboe callback mode error detected.");
                             self.quit_data_reader_and_oboe();
                         }
                     }
@@ -401,7 +401,14 @@ impl OboeLogic {
                         return None;
                     }
 
-                    let callback_oboe = OboeCppCallbackMode::new(PcmReceiver::DirectReceiver(send_handle.build()), oboe_info.clone());
+                    let mut send_handle = send_handle.build();
+
+                    if let Err(e) = send_handle.set_nonblocking(true) {
+                        error!("Error: {e}");
+                        return None;
+                    }
+
+                    let callback_oboe = OboeCppCallbackMode::new(PcmReceiver::DirectReceiver(send_handle), oboe_info.clone());
 
                     let mut oboe_mode = OboeMode::Direct {
                         callback_oboe,

@@ -40,6 +40,8 @@ pub trait DataSenderInterface: Debug + Send {
 pub trait DataReceiverInterface: Debug + Send {
     fn is_reliable_connection(&self) -> bool;
 
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), std::io::Error>;
+
     fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error>;
 
     /// Max packet lenght is 65 507 bytes (max packet length with IPv4 and UDP).
@@ -81,6 +83,10 @@ impl DataReceiverBuilderInterface for EmptyReceiver {
 impl DataReceiverInterface for EmptyReceiver {
     fn is_reliable_connection(&self) -> bool {
         false
+    }
+
+    fn set_nonblocking(&mut self, value: bool) -> Result<(), std::io::Error> {
+        Ok(())
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {

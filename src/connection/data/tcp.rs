@@ -97,6 +97,10 @@ impl DataReceiverInterface for TcpDataConnection {
         self.tcp_stream.set_read_timeout(timeout)
     }
 
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), std::io::Error> {
+        self.tcp_stream.set_nonblocking(nonblocking)
+    }
+
     fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         let mut size_bytes = [0u8; 2];
         self.tcp_stream.read_exact(&mut size_bytes)?;

@@ -25,6 +25,7 @@ impl UsbDataConnectionBuilder {
         let usb_receiver = Box::new(UsbDataConnectionReceiver {
             receiver,
             timeout: None,
+            nonbloking: false,
         });
 
         (usb_sender, usb_receiver)
@@ -40,6 +41,7 @@ impl UsbDataConnectionBuilder {
         let usb_receiver = Box::new(UsbDataConnectionReceiver {
             receiver,
             timeout: None,
+            nonbloking: false,
         });
 
         (usb_sender, usb_receiver)
@@ -94,6 +96,7 @@ impl DataSenderInterface for UsbDataConnectionSender {
 pub struct UsbDataConnectionReceiver {
     receiver: Receiver<UsbPacketWrapper>,
     timeout: Option<Duration>,
+    nonbloking: bool,
 }
 
 impl UsbDataConnectionReceiver {
@@ -135,8 +138,20 @@ impl DataReceiverInterface for UsbDataConnectionReceiver {
         Ok(())
     }
 
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), std::io::Error> {
+        self.nonbloking = nonblocking;
+        Ok(())
+    }
+
     fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
-        let packet = if let Some(timeout) = self.timeout {
+        let packet = if self.nonbloking {
+            self.receiver.try_recv().map_err(|e| {
+                match e {
+                    TryRecvError::Disconnected => ErrorKind::BrokenPipe,
+                    TryRecvError::Empty => ErrorKind::WouldBlock,
+                }
+            })?
+        } else if let Some(timeout) = self.timeout {
             self.receiver.recv_timeout(timeout).map_err(|e| {
                 match e {
                     RecvTimeoutError::Disconnected => ErrorKind::BrokenPipe,

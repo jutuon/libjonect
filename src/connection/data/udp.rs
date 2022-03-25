@@ -161,6 +161,10 @@ impl DataReceiverInterface for UdpDataConnection {
         self.udp_socket.set_read_timeout(timeout)
     }
 
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), std::io::Error> {
+        self.udp_socket.set_nonblocking(nonblocking)
+    }
+
     fn recv_packet(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         loop {
             let (size, address) = self.udp_socket.recv_from(buffer)?;

@@ -34,6 +34,8 @@ pub const JSON_PORT: u16 = 8080;
 pub const RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES: usize = RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES * 2;
 pub const RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES: usize = 240;
 
+pub const PCM_AUDIO_PACKET_SIZE_IN_BYTES: usize = RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES + 4;
+
 #[derive(Debug, Clone)]
 pub struct LogicConfig {
     pub pa_source_name: Option<String>,
