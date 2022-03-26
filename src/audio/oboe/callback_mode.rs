@@ -6,7 +6,7 @@
 
 use log::{error};
 
-use std::{sync::{atomic::{Ordering, AtomicU32, AtomicBool}, mpsc::{Receiver}}, process::abort, io::ErrorKind};
+use std::{sync::{atomic::{Ordering, AtomicU32, AtomicBool}, mpsc::{Receiver}}, process::abort, io::ErrorKind, collections::VecDeque};
 
 
 use crate::{audio::oboe::AUDIO_BLOCK_SAMPLE_COUNT, connection::data::{DataReceiver, MAX_PACKET_SIZE}, config::{RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_BYTES, RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES, PCM_AUDIO_PACKET_SIZE_IN_BYTES}};
@@ -20,6 +20,92 @@ static RECV_BLOCKING_COUNT: AtomicU32 = AtomicU32::new(0);
 
 static CALLBACK_ERROR_DETECTED: AtomicBool = AtomicBool::new(false);
 
+const DIRECT_MODE_BUFFERING_COUNT: usize = 1;
+
+struct AudioBuffer {
+    data: VecDeque<[i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES]>,
+    buffer: [i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES],
+    playing_started: bool,
+}
+
+impl AudioBuffer {
+    fn new() -> Self {
+        Self {
+            data: VecDeque::with_capacity(DIRECT_MODE_BUFFERING_COUNT),
+            playing_started: false,
+            buffer: [0; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES],
+        }
+    }
+
+    fn playing_started(&self) -> bool {
+        self.playing_started
+    }
+
+    fn audio_buffer_full(&self) -> bool {
+        self.data.len() >= DIRECT_MODE_BUFFERING_COUNT
+    }
+
+    fn new_data_required(&self) -> bool {
+        if self.playing_started {
+            self.data.is_empty()
+        } else {
+            !self.audio_buffer_full()
+        }
+    }
+
+    fn add_new_audio_packet(&mut self, audio_packet: &[u8]) {
+        // Direct mode is only enabled for reliable connections so there is no
+        // need to check the packet counter.
+        let (_packet_counter_bytes, audio_data) = audio_packet.split_at(4);
+
+        if self.playing_started {
+            for (target, sample_bytes) in self.buffer.as_mut_slice().iter_mut().zip(audio_data.chunks_exact(2)) {
+                match sample_bytes.try_into() {
+                    Ok(sample) => {
+                        *target = i16::from_le_bytes(sample);
+                    }
+                    Err(_) => {
+                        abort()
+                    }
+                }
+            }
+        } else {
+            let mut new_data = [0i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES];
+            for (target, sample_bytes) in new_data.as_mut_slice().iter_mut().zip(audio_data.chunks_exact(2)) {
+                match sample_bytes.try_into() {
+                    Ok(sample) => {
+                        *target = i16::from_le_bytes(sample);
+                    }
+                    Err(_) => {
+                        abort()
+                    }
+                }
+            }
+
+            self.data.push_back(new_data);
+
+            if self.audio_buffer_full() {
+                self.playing_started = true;
+            }
+        }
+    }
+
+    fn get_audio_data(&mut self) -> &[i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES] {
+        if self.playing_started {
+            match self.data.pop_front() {
+                Some(data) => {
+                    self.buffer = data;
+                    &self.buffer
+                }
+                None => &self.buffer
+            }
+        } else {
+            &self.buffer
+        }
+
+    }
+}
+
 enum BufferAndReceiver {
     AudioDataBlock(Receiver<AudioDataBlock>, AudioDataBlock),
     // Note that MAX_PACKET_SIZE % 2 != 0, but this should not be a problem as
@@ -28,8 +114,7 @@ enum BufferAndReceiver {
     DirectReceiver {
         receiver: DataReceiver,
         conversion_buffer: [u8; PCM_AUDIO_PACKET_SIZE_IN_BYTES],
-        buffer: [i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES],
-        stream_started: bool,
+        buffer: AudioBuffer,
     },
 }
 
@@ -68,49 +153,37 @@ impl CallbackState {
                         }
                     };
                 }
-                BufferAndReceiver::DirectReceiver { receiver, conversion_buffer, buffer, stream_started } => {
-                    let data = match receiver.recv_packet(conversion_buffer.as_mut_slice()) {
-                        Ok(0) => {
+                BufferAndReceiver::DirectReceiver { receiver, conversion_buffer, buffer } => {
+                    if buffer.new_data_required() {
+                        let audio_packet = match receiver.recv_packet(conversion_buffer.as_mut_slice()) {
+                            Ok(0) => {
+                                return Err(());
+                            }
+                            Ok(size) => &conversion_buffer[..size],
+                            Err(e) => {
+                                match e.kind() {
+                                    ErrorKind::WouldBlock => {
+                                        &[]
+                                    }
+                                    _ => {
+                                        return Err(());
+                                    }
+                                }
+                            }
+                        };
+
+                        if audio_packet.is_empty() && !buffer.playing_started() {
+                            // AudioBuffer's get_audio_data() returns silence currently.
+                        } else if audio_packet.is_empty() {
+                            // This is probably a data sending bug.
                             return Err(());
-                        }
-                        Ok(size) => &conversion_buffer[..size],
-                        Err(e) => {
-                            match e.kind() {
-                                ErrorKind::WouldBlock => {
-                                    &[]
-                                }
-                                _ => {
-                                    return Err(());
-                                }
-                            }
-                        }
-                    };
+                        } else {
+                            buffer.add_new_audio_packet(audio_packet);
 
-                    if data.is_empty() && !*stream_started {
-                        // Buffer contains silence currently.
-                    } else if data.is_empty() {
-                        // This is probably a data sending bug.
-                        return Err(());
-                    } else {
-                        if !*stream_started {
-                            *stream_started = true;
-                            match receiver.set_nonblocking(false) {
-                                Ok(()) => (),
-                                Err(_) => return Err(()),
-                            }
-                        }
-
-                        // Direct mode is only enabled for reliable connections.
-
-                        let (_packet_counter_bytes, audio_data) = data.split_at(4);
-
-                        for (target, sample_bytes) in buffer.as_mut_slice().iter_mut().zip(audio_data.chunks_exact(2)) {
-                            match sample_bytes.try_into() {
-                                Ok(sample) => {
-                                    *target = i16::from_le_bytes(sample);
-                                }
-                                Err(_) => {
-                                    abort()
+                            if buffer.playing_started() {
+                                match receiver.set_nonblocking(false) {
+                                    Ok(()) => (),
+                                    Err(_) => return Err(()),
                                 }
                             }
                         }
@@ -121,9 +194,9 @@ impl CallbackState {
             }
         }
 
-        let current_data = match &self.pcm_data_receiver {
+        let current_data = match &mut self.pcm_data_receiver {
             BufferAndReceiver::AudioDataBlock(_, buffer) => buffer.as_slice(),
-            BufferAndReceiver::DirectReceiver { buffer, .. } => buffer.as_slice(),
+            BufferAndReceiver::DirectReceiver { buffer, .. } => buffer.get_audio_data().as_slice(),
         };
 
         let (_, unwritten_data) = current_data.split_at(self.samples_written);
@@ -149,8 +222,7 @@ impl PcmReceiver {
             PcmReceiver::DirectReceiver(receiver) => BufferAndReceiver::DirectReceiver{
                 receiver,
                 conversion_buffer: [0; PCM_AUDIO_PACKET_SIZE_IN_BYTES],
-                buffer: [0i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES],
-                stream_started: false,
+                buffer: AudioBuffer::new(),
             },
         }
     }
