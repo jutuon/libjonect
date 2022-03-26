@@ -328,7 +328,16 @@ impl PAStreamManager {
         use pulse::stream::PeekResult;
 
         loop {
-            let peek_result = r.peek().unwrap();
+            let peek_result = match r.peek() {
+                Ok(peek_result) => peek_result,
+                Err(e) => {
+                    error!("Error: {e}");
+                    self.enable_recording = false;
+                    self.stop_recording();
+                    return;
+                }
+            };
+
             match peek_result {
                 PeekResult::Empty => {
                     break;
@@ -362,7 +371,12 @@ impl PAStreamManager {
                         Ok(()) => (),
                         Err(e) => {
                             error!("Audio streaming error: {:?}", e);
-                            r.discard().unwrap();
+                            match r.discard() {
+                                Ok(()) => (),
+                                Err(e) => {
+                                    error!("Error: {e}");
+                                }
+                            };
                             self.enable_recording = false;
                             self.stop_recording();
                             return;
@@ -372,7 +386,15 @@ impl PAStreamManager {
                 PeekResult::Hole(_) => (),
             }
 
-            r.discard().unwrap();
+            match r.discard() {
+                Ok(()) => (),
+                Err(e) => {
+                    error!("Error: {e}");
+                    self.enable_recording = false;
+                    self.stop_recording();
+                    return;
+                }
+            };
         }
     }
 
@@ -396,7 +418,12 @@ impl PAStreamManager {
     /// Disconnect recording stream.
     pub fn stop_recording(&mut self) {
         if let Some((stream, _)) = self.record.as_mut() {
-            stream.disconnect().unwrap();
+            match stream.disconnect() {
+                Ok(()) => (),
+                Err(e) => {
+                    error!("Error: {e}");
+                }
+            }
         }
     }
 
@@ -406,7 +433,12 @@ impl PAStreamManager {
         self.quit_requested = true;
 
         if let Some((stream, _)) = self.record.as_mut() {
-            stream.disconnect().unwrap();
+            match stream.disconnect() {
+                Ok(()) => (),
+                Err(e) => {
+                    error!("Error: {e}");
+                }
+            }
         } else {
             self.sender.send_pa(PAEvent::StreamManagerQuitReady);
         }
