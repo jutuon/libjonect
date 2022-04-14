@@ -11,8 +11,8 @@ pub fn config_thread_priority(name: &str) {
         // libc::setpriority will set thread nice value but this might
         // change in the future. Alternative would be sched_setattr system
         // call. Value of Android API constant Process.THREAD_PRIORITY_AUDIO
-        // is -16.
-        libc::setpriority(libc::PRIO_PROCESS, 0, -16)
+        // is -16 and Process.THREAD_PRIORITY_URGENT_AUDIO is -19.
+        libc::setpriority(libc::PRIO_PROCESS, 0, -19)
     };
 
     if result == -1 {
