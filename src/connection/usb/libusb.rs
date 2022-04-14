@@ -19,7 +19,8 @@ use self::{accessory::AndroidUsbAccessory, android::AndroidUsbDevice};
 use super::{UsbEvent, protocol::{UsbPacketOutType, USB_PACKET_MAX_DATA_SIZE, UsbPacketInType, UsbPacket}, UsbDataChannelCreatorI};
 
 const KNOWN_ANDROID_VENDOR_IDS: &[u16] = &[
-    0x0e8d,
+    0x0e8d, // Nokia 2.2
+    0x2a70, // OnePlus 5
 ];
 
 const USB_TIMEOUT: Duration = Duration::from_millis(500);
