@@ -20,7 +20,7 @@ static RECV_BLOCKING_COUNT: AtomicU32 = AtomicU32::new(0);
 
 static CALLBACK_ERROR_DETECTED: AtomicBool = AtomicBool::new(false);
 
-const DIRECT_MODE_BUFFERING_COUNT: usize = 1;
+const DIRECT_MODE_BUFFERING_COUNT: usize = 2;
 
 struct AudioBuffer {
     data: VecDeque<[i16; RAW_PCM_AUDIO_UDP_DATA_SIZE_IN_SAMPLES]>,
