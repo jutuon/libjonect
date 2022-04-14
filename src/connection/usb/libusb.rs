@@ -184,7 +184,7 @@ struct Quit;
 
 enum Mode {
     PollUsbDevices,
-    AccessoryConnected(AccessoryConnection),
+    AccessoryConnected { accessory: AccessoryConnection, audio_connected: bool },
 }
 
 impl Mode {
@@ -198,7 +198,7 @@ impl Mode {
                             logic.first_connect = false;
 
                             if let Some(accessory) = LibUsbLogic::try_get_accessory_connection(context) {
-                                Mode::AccessoryConnected(accessory)
+                                Mode::AccessoryConnected { accessory, audio_connected: false }
                             } else {
                                 self
                             }
@@ -211,17 +211,19 @@ impl Mode {
                     LibUsbEvent::SendAudioData(_) => self,
                 }
             }
-            Mode::AccessoryConnected(mut accessory) => {
+            Mode::AccessoryConnected { mut accessory, mut audio_connected } => {
                 match logic.receiver.recv().unwrap().event() {
-                    LibUsbEvent::RequestQuit => return (Some(Quit), Mode::AccessoryConnected(accessory)),
+                    LibUsbEvent::RequestQuit => return (Some(Quit), Mode::AccessoryConnected { accessory, audio_connected }),
                     LibUsbEvent::PollUsbDevices => (),
                     LibUsbEvent::JsonPollIfConnected => {
-                        match accessory.receive_next() {
-                            Ok(()) => (),
-                            Err(e) => {
-                                error!("Error: {e:?}");
-                                return (None, Mode::PollUsbDevices);
-                            },
+                        if !audio_connected {
+                            match accessory.receive_next() {
+                                Ok(()) => (),
+                                Err(e) => {
+                                    error!("Error: {e:?}");
+                                    return (None, Mode::PollUsbDevices);
+                                },
+                            }
                         }
 
                         match accessory.update_connection() {
@@ -242,6 +244,8 @@ impl Mode {
                         }
                     }
                     LibUsbEvent::SendAudioData(data) => {
+                        audio_connected = true;
+
                         match accessory.send_audio_packet(data) {
                             Ok(()) => (),
                             Err(e) => {
@@ -252,7 +256,7 @@ impl Mode {
                     }
                 }
 
-                Mode::AccessoryConnected(accessory)
+                Mode::AccessoryConnected { accessory, audio_connected }
             }
         };
 
@@ -297,7 +301,7 @@ impl LibUsbLogic {
         let mut mode = Mode::PollUsbDevices;
 
         loop {
-            let previous_mode_poll = matches!(&mode, Mode::AccessoryConnected(_));
+            let previous_mode_poll = matches!(&mode, Mode::AccessoryConnected{ .. });
 
             let (quit, new_mode) = mode.update(&mut self, &context);
             mode = new_mode;
